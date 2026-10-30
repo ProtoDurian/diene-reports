@@ -1,0 +1,25 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "diene-reports",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-10-01",
+  "workers_dev": false,
+  "preview_urls": false,
+  "routes": [{ "pattern": "reports.atomi.cloud", "custom_domain": true }],
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "diene_reports",
+      "database_id": "463c9bac-575d-4b46-98f9-28bca68b3e2f",
+      "migrations_dir": "migrations"
+    }
+  ],
+  "r2_buckets": [{ "binding": "BUCKET", "bucket_name": "diene-reports" }],
+  "vars": {
+    "ALLOWED_OWNER_IDS": "349664883,55664364",
+    "OIDC_AUDIENCE": "diene-reports",
+    "PUBLIC_BASE_URL": "https://reports.atomi.cloud"
+  },
+  "triggers": { "crons": ["*/15 * * * *", "17 3 * * *"] },
+  "observability": { "enabled": true }
+}
