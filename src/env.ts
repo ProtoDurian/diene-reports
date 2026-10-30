@@ -4,8 +4,11 @@ export interface Env {
   ALLOWED_OWNER_IDS: string;
   OIDC_AUDIENCE: string;
   PUBLIC_BASE_URL: string;
-  ACCESS_TEAM_DOMAIN: string;
-  ACCESS_AUD: string;
+  /** GitHub App client id (var) */
+  GITHUB_CLIENT_ID: string;
+  /** secrets: `wrangler secret put` */
+  GITHUB_CLIENT_SECRET: string;
+  SESSION_KEY: string;
 }
 
 export const ISSUER = "https://token.actions.githubusercontent.com";
@@ -30,3 +33,4 @@ export const LIMITS = {
 
 export const DAY = 86_400_000;
 export const MINUTE = 60_000;
+export const HOUR = 60 * MINUTE;

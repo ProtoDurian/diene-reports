@@ -26,8 +26,8 @@ Run it again after every release that adds a file to `migrations/`. Apply it **b
 wrangler deploy
 ```
 
-This sets the custom domain `reports.atomi.cloud`, both crons and the vars. `workers_dev` is off on purpose:
-the `*.workers.dev` host is not behind Cloudflare Access.
+This sets the custom domain `reports.atomi.cloud`, the three crons (every 15 min lost-run sweep, every 30 min repo-visibility re-check, daily 03:17 cleanup) and the vars. `workers_dev` is off on purpose:
+only `reports.atomi.cloud` serves the Worker. Set the secrets in section 5 **before** the first deploy that has `GITHUB_CLIENT_ID` filled in.
 
 ## 4. R2 lifecycle rules (once)
 
@@ -43,29 +43,66 @@ wrangler r2 bucket lifecycle list diene-reports
 
 **Do not add a rule for `keep/`.** It holds the newest coverage run of each branch and flag (replaced on every finish) and never expires.
 
-## 5. Cloudflare Access
+## 5. Sign in with GitHub
 
-- Access app on `reports.atomi.cloud` for people (the viewer).
-- Bypass policy for `/api/v1/*` (GitHub OIDC is the auth there) and `/badge/*`.
-- Leave `/healthz` behind Access or add it to the bypass; it only returns `{"ok":true}`.
-- The Worker also checks the `Cf-Access-Jwt-Assertion` header itself on every other route (team `ACCESS_TEAM_DOMAIN`, audience `ACCESS_AUD`, both in `wrangler.jsonc`). A missing or invalid token gets 403, so a misconfigured Access app or an enabled `workers.dev` host cannot expose private source. The only exempt paths are `/healthz`, `/api/v1/*` and `/badge/<owner>/<repo>/<flag>`.
+The viewer has its own login (no Cloudflare Access, no Zero Trust, no VPN). Public repos are open to everyone; private and internal
+repos only to signed-in users that GitHub says can see the repo.
+
+**a. Create a GitHub App** (in the `ProtoDurian` org settings, Developer settings, GitHub Apps):
+
+- Callback URL: `https://reports.atomi.cloud/auth/callback`
+- Expire user authorization tokens: **on** (default). The Worker refreshes them.
+- Request user authorization during installation, Webhook: **off**
+- Permissions: **Repository, Metadata: read-only** (this is all that is needed to ask "can this user see this repo").
+  No account permissions.
+- Where it can be installed: any account. **Install the App on every org/repo whose private projects should be visible.**
+  A user only sees a private repo in the viewer when the App can see it **and** they can.
+- Generate a client secret.
+
+**b. The client id** is already set in `wrangler.jsonc` (`vars.GITHUB_CLIENT_ID = "Iv23liYO0YI12YeI2S5S"`). It is not secret. Login stays off
+(`/login` answers 503) while it is `TBD` or empty. The same id + the client secret are also used (HTTP Basic) by the visibility cron and to revoke tokens on sign-out.
+
+**c. Set the two secrets** (never commit them):
+
+```sh
+wrangler secret put GITHUB_CLIENT_SECRET     # paste the App's client secret
+openssl rand -base64 32 | wrangler secret put SESSION_KEY   # 32 random bytes, base64
+```
+
+`SESSION_KEY` encrypts the stored GitHub tokens and signs the login state. Changing it signs everybody out (existing sessions cannot
+be decrypted, they are treated as signed out and cleaned up by the cron). Keep a copy only in your secret store.
+
+**d. Apply migrations `0004_sessions.sql` and `0005_repo_visibility_checked.sql`** (step 2, `--remote`) before deploying.
+Without `0005` the viewer cannot read `repos.vis_checked_at` and every viewer page errors.
+
+**e. Remove the old Cloudflare Access apps** for `reports.atomi.cloud` (and their bypass policies), if any exist. The Worker ignores
+`Cf-Access-Jwt-Assertion` now, so leaving them in place only blocks people.
 
 ## 6. Check
 
 ```sh
-curl -s https://reports.atomi.cloud/healthz            # {"ok":true} (through Access)
-curl -si https://reports.atomi.cloud/api/v1/runs/known-failing?flag=x   # 401 without a token
+curl -s https://reports.atomi.cloud/healthz                              # {"ok":true}
+curl -si https://reports.atomi.cloud/api/v1/runs/known-failing?flag=x    # 401 without a token
+curl -si https://reports.atomi.cloud/login | head -3                     # 302 to github.com/login/oauth/authorize (503 = not configured)
+curl -si https://reports.atomi.cloud/SomeOrg/some-private-repo | head -1 # 404 when signed out
 ```
+
+Then open `https://reports.atomi.cloud/` in a browser, click **Sign in with GitHub**, and open a private project you can see.
 
 ## Local
 
-The viewer needs an Access token, so a small stand-in signs one for you.
-
 ```sh
 bun run seed                 # fills local D1 + R2 with every outcome class (demo-app, PR #7, a private repo)
-wrangler dev --local --port 8799 --var ACCESS_TEAM_DOMAIN:http://localhost:8800 --var ACCESS_AUD:local-dev
-bun run dev:access           # second terminal: serves the JWKS and proxies to :8799 with a signed token
-# open http://localhost:8800/ProtoDurian/demo-app/commit/0000000000000000000000000000000000000003
+bun run dev                  # wrangler dev; public repos work with no login setup
+# open http://localhost:8787/ProtoDurian/demo-app/commit/0000000000000000000000000000000000000003
+```
+
+To try sign-in locally you need a GitHub App of your own with callback `http://localhost:8787/auth/callback`. Put its secrets in
+`.dev.vars` (git-ignored; `wrangler dev` reads it) and override the vars on the command line:
+
+```sh
+printf 'GITHUB_CLIENT_SECRET=...\nSESSION_KEY=%s\n' "$(openssl rand -base64 32)" > .dev.vars
+wrangler dev --var GITHUB_CLIENT_ID:Iv1.yourid --var PUBLIC_BASE_URL:http://localhost:8787
 ```
 
 The seed runs the real API against in-memory shims and copies the result into the local wrangler state.

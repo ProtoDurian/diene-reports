@@ -9,9 +9,9 @@ same change, or not at all. Background and reasons: `DESIGN.md` in this folder (
 
 | Item | Value |
 |---|---|
-| Hostname | `https://reports.atomi.cloud` (Worker custom domain; atomi.dev is in another Cloudflare account). Also reachable at `https://diene-reports.kirinnee.workers.dev` |
+| Hostname | `https://reports.atomi.cloud` (Worker custom domain; atomi.dev is in another Cloudflare account). Only this host serves the Worker (`workers_dev` is off) |
 | Plan | Workers Paid (already on the account) |
-| Viewer access | Cloudflare Access on the whole host, reusing the account's existing reusable policy `primordial-ernestOnly`. Bypass for `/api/v1/*` and `/badge/*` |
+| Viewer access | Built-in "Sign in with GitHub" (a GitHub App's user login). Public repos are open to everyone; private and internal repos only to signed-in users GitHub says can see the repo. No Cloudflare Access / Zero Trust (owner decision 2026-10-30) |
 | Rollout | shadow next to Codecov for 1 week, then remove Codecov |
 | Action home | `ProtoDurian/actions.test-report`, pinned `@v1` (moving major tag) |
 | OIDC audience | `diene-reports` |

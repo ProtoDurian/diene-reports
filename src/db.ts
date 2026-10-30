@@ -18,9 +18,9 @@ export async function guard(db: D1Database, id: Identity, flag: string, job: str
 export function upsertRepo(db: D1Database, id: Identity, now: number): D1PreparedStatement {
   return db
     .prepare(
-      `INSERT INTO repos (repo_id, owner, name, visibility, created_at, updated_at) VALUES (?1, ?2, ?3, ?4, ?5, ?5)
+      `INSERT INTO repos (repo_id, owner, name, visibility, created_at, updated_at, vis_checked_at) VALUES (?1, ?2, ?3, ?4, ?5, ?5, ?5)
        ON CONFLICT (repo_id) DO UPDATE SET owner = excluded.owner, name = excluded.name,
-         visibility = excluded.visibility, updated_at = excluded.updated_at`,
+         visibility = excluded.visibility, updated_at = excluded.updated_at, vis_checked_at = excluded.vis_checked_at`,
     )
     .bind(id.repoId, id.owner, id.name, id.visibility, now);
 }

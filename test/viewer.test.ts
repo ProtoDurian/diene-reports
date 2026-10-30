@@ -152,9 +152,10 @@ describe("badges", () => {
     expect(r.text).toMatch(/failing|passing|failed/);
   });
 
-  test("private repos are grey 'private'; unknown repos grey 'unknown'", async () => {
+  test("private and unknown repos both give the same grey 'unknown'", async () => {
     const p = await get(`/badge/ProtoDurian/secret-svc/unit.svg`);
-    expect(p.text).toContain("private");
+    expect(p.text).toContain("unknown");
+    expect(p.text).not.toContain("private");
     expect(p.text).toContain("#8a8f98");
     expect(p.text).not.toContain("%");
     expect((await get(`/badge/x/y/unit.svg`)).text).toContain("unknown");

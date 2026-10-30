@@ -7,6 +7,7 @@ export interface Repo {
   name: string;
   visibility: string;
   default_branch: string | null;
+  vis_checked_at: number;
 }
 export interface FailureRow {
   run_id: number;
@@ -25,7 +26,7 @@ export interface FailureRow {
 
 export async function findRepo(env: Env, owner: string, name: string): Promise<Repo | null> {
   return env.DB
-    .prepare(`SELECT repo_id, owner, name, visibility, default_branch FROM repos WHERE owner = ?1 COLLATE NOCASE AND name = ?2 COLLATE NOCASE`)
+    .prepare(`SELECT repo_id, owner, name, visibility, default_branch, vis_checked_at FROM repos WHERE owner = ?1 COLLATE NOCASE AND name = ?2 COLLATE NOCASE`)
     .bind(owner, name)
     .first<Repo>();
 }
@@ -117,12 +118,12 @@ export const headWithCoverage = (h: Head): RunRow =>
 export async function homeRows(env: Env) {
   const res = await env.DB
     .prepare(
-      `SELECT rp.owner, rp.name, rp.visibility, p.branch, c.cov_lines AS c_lines, c.cov_lines_hit AS c_hit, c.cov_partial AS c_partial, r.* FROM branch_head h
+      `SELECT rp.owner, rp.name, rp.visibility, rp.vis_checked_at, p.branch, c.cov_lines AS c_lines, c.cov_lines_hit AS c_hit, c.cov_partial AS c_partial, r.* FROM branch_head h
        JOIN projects p ON p.project_id = h.project_id JOIN repos rp ON rp.repo_id = p.repo_id JOIN runs r ON r.id = h.run_id
        LEFT JOIN runs c ON c.id = h.cov_run_id
        ORDER BY rp.owner, rp.name, p.branch, r.flag`,
     )
-    .all<RunRow & { owner: string; name: string; visibility: string; c_lines: number | null; c_hit: number | null; c_partial: number | null }>();
+    .all<RunRow & { owner: string; name: string; visibility: string; vis_checked_at: number; c_lines: number | null; c_hit: number | null; c_partial: number | null }>();
   return res.results.map(({ c_lines, c_hit, c_partial, ...r }) =>
     c_lines === null ? r : { ...r, cov_lines: c_lines, cov_lines_hit: c_hit, cov_partial: c_partial ?? 0 },
   );

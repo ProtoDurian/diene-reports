@@ -38,4 +38,4 @@ const run = (args: string[]) => {
 run(["d1", "migrations", "apply", "diene_reports", "--local"]);
 run(["d1", "execute", "diene_reports", "--local", "--file", join(tmp, "seed.sql")]);
 for (const key of objects) run(["r2", "object", "put", `diene-reports/${key}`, "--local", "--file", join(tmp, "r2", key)]);
-console.log(`seeded ${tables.length} tables and ${objects.length} R2 objects. Next: see docs/DEPLOY.md "Local" (wrangler dev + bun run dev:access)`);
+console.log(`seeded ${tables.length} tables and ${objects.length} R2 objects. Next: see docs/DEPLOY.md "Local" (bun run dev)`);

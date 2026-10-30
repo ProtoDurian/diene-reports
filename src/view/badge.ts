@@ -21,8 +21,8 @@ export const coverageColor = (p: number) => (p >= 80 ? COLORS.ok : p >= 60 ? COL
 
 export async function badge(env: Env, owner: string, name: string, flag: string, branchParam: string | null): Promise<string> {
   const repo = await findRepo(env, owner, name);
-  if (!repo) return svgBadge(flag, "unknown", COLORS.grey);
-  if (repo.visibility !== "public") return svgBadge(flag, "private", COLORS.grey);
+  // a private repo answers exactly like an unknown one, so a badge URL cannot tell the two apart
+  if (!repo || repo.visibility !== "public") return svgBadge(flag, "unknown", COLORS.grey);
   const branch = branchParam ?? repo.default_branch ?? "main";
   const pid = await projectId(env, repo.repo_id, branch);
   if (pid === null) return svgBadge(flag, "unknown", COLORS.grey);
