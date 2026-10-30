@@ -2,6 +2,7 @@ import { gzipSync } from "node:zlib";
 import { createHash } from "node:crypto";
 import { buildApp } from "../src/app";
 import { JwksCache, type Jwk } from "../src/auth";
+import { resetAppCaches } from "../src/githubapp";
 import type { Env } from "../src/env";
 import { D1Shim, R2Shim } from "./shims";
 
@@ -81,7 +82,7 @@ export interface FakeGithub {
   refreshFails: boolean;
   /** GitHub is unreachable */
   down: boolean;
-  /** what GitHub says about a repo to the App (Basic auth). Unlisted repos answer from our own table, i.e. "nothing changed". */
+  /** what GitHub says about a repo (to the installation or unauthenticated). Unlisted repos answer from our own table, i.e. "nothing changed". */
   repos: Map<number, { visibility: string; full_name?: string } | { status: number }>;
   /** user-token repo lookups answer 403 + x-ratelimit-remaining: 0 */
   rateLimited: boolean;
@@ -89,6 +90,24 @@ export interface FakeGithub {
   refreshStatus: number | null;
   /** DELETE /applications/{id}/token answers with this status */
   revokeStatus: number;
+  /** the GitHub App: JWT checks, installations per owner, installation tokens */
+  app: {
+    id: string;
+    publicKey: CryptoKey | null;
+    /** lower-case owner -> installation (orgs answer /orgs/x/installation, users only /users/x/installation) */
+    installs: Map<string, { id: number; type: "Organization" | "User" }>;
+    /** installation tokens handed out: token -> installation id */
+    tokens: Map<string, number>;
+    /** seconds an installation token lives */
+    tokenTtl: number;
+    /** make the endpoint answer with this status instead (lookup = /orgs|users/x/installation, mint = access_tokens) */
+    lookupStatus: number | null;
+    mintStatus: number | null;
+    /** every verified app JWT's claims */
+    jwts: Record<string, unknown>[];
+  };
+  /** unauthenticated /repositories/{id} calls left before GitHub answers 403 (null = unlimited) */
+  unauthLeft: number | null;
   count(match: string): number;
 }
 
@@ -107,6 +126,8 @@ export function makeFakeGithub(now: () => number, own: (repoId: number) => Promi
     rateLimited: false,
     refreshStatus: null,
     revokeStatus: 204,
+    app: { id: "5545592", publicKey: null, installs: new Map(), tokens: new Map(), tokenTtl: 3600, lookupStatus: null, mintStatus: null, jwts: [] },
+    unauthLeft: null,
     count: (match) => gh.calls.filter((c) => c.url.includes(match)).length,
     fetch: async (url, init = {}) => {
       const h = new Headers(init.headers);
@@ -147,17 +168,55 @@ export function makeFakeGithub(now: () => number, own: (repoId: number) => Promi
         const u = gh.users.get(uid)!;
         return json({ id: u.id, login: u.login, avatar_url: `https://avatars.githubusercontent.com/u/${u.id}?v=4` });
       }
+      // ---- the GitHub App: JWT -> installation lookup -> installation token
+      const jwtOk = async (): Promise<boolean> => {
+        const parts = auth.replace(/^Bearer /, "").split(".");
+        if (parts.length !== 3 || !gh.app.publicKey) return false;
+        const sig = Uint8Array.from(atob(parts[2]!.replace(/-/g, "+").replace(/_/g, "/")), (c) => c.charCodeAt(0));
+        if (!(await crypto.subtle.verify("RSASSA-PKCS1-v1_5", gh.app.publicKey, sig, new TextEncoder().encode(parts[0] + "." + parts[1])))) return false;
+        const c = JSON.parse(atob(parts[1]!.replace(/-/g, "+").replace(/_/g, "/")));
+        gh.app.jwts.push(c);
+        const t = Math.floor(now() / 1000);
+        return c.iss === gh.app.id && c.iat <= t && c.exp > t && c.exp - c.iat <= 600;
+      };
+      const mInst = /^https:\/\/api\.github\.com\/(orgs|users)\/([^/]+)\/installation$/.exec(url);
+      if (mInst) {
+        if (!(await jwtOk())) return json({ message: "A JSON web token could not be decoded" }, 401);
+        if (gh.app.lookupStatus) return json({ message: "boom" }, gh.app.lookupStatus);
+        const inst = gh.app.installs.get(mInst[2]!.toLowerCase());
+        if (!inst || (mInst[1] === "orgs" && inst.type !== "Organization")) return json({ message: "Not Found" }, 404);
+        return json({ id: inst.id, account: { login: mInst[2] } });
+      }
+      const mMint = /^https:\/\/api\.github\.com\/app\/installations\/(\d+)\/access_tokens$/.exec(url);
+      if (mMint && init.method === "POST") {
+        if (!(await jwtOk())) return json({ message: "A JSON web token could not be decoded" }, 401);
+        if (gh.app.mintStatus) return json({ message: "boom" }, gh.app.mintStatus);
+        if (![...gh.app.installs.values()].some((i) => i.id === Number(mMint[1]))) return json({ message: "Not Found" }, 404);
+        n++;
+        const token = `ghs_install${n}`;
+        gh.app.tokens.set(token, Number(mMint[1]));
+        return json({ token, expires_at: new Date(now() + gh.app.tokenTtl * 1000).toISOString() }, 201);
+      }
+
       const m = /^https:\/\/api\.github\.com\/repositories\/(\d+)$/.exec(url);
-      if (m && auth.startsWith("Basic ")) {
-        if (auth !== `Basic ${btoa("Iv1.testclient:test-client-secret")}`) return json({ message: "Bad credentials" }, 401);
+      const installId = gh.app.tokens.get(auth.replace(/^Bearer /, ""));
+      if (m && uid === undefined) {
+        // not a signed-in user: an installation token, or nobody
+        if (auth !== "" && installId === undefined) return json({ message: "Bad credentials" }, 401);
+        if (installId === undefined && gh.unauthLeft !== null && gh.unauthLeft-- <= 0) {
+          return new Response(JSON.stringify({ message: "API rate limit exceeded" }), { status: 403, headers: { "x-ratelimit-remaining": "0" } });
+        }
         const id = Number(m[1]);
         const set = gh.repos.get(id);
         if (set && "status" in set) return json({ message: "boom" }, set.status);
-        if (set) return json({ id, visibility: set.visibility, private: set.visibility !== "public", full_name: set.full_name ?? undefined });
         const mine = await own(id);
-        // like GitHub, the App sees public repos only
-        if (!mine || mine.visibility !== "public") return json({ message: "Not Found" }, 404);
-        return json({ id, visibility: "public", private: false, full_name: `${mine.owner}/${mine.name}` });
+        const truth = set ?? (mine && { visibility: mine.visibility, full_name: `${mine.owner}/${mine.name}` });
+        if (!truth) return json({ message: "Not Found" }, 404);
+        const fullName = truth.full_name ?? (mine ? `${mine.owner}/${mine.name}` : "");
+        const owner = fullName.split("/")[0]!.toLowerCase();
+        const mayRead = truth.visibility === "public" || (installId !== undefined && gh.app.installs.get(owner)?.id === installId);
+        if (!mayRead) return json({ message: "Not Found" }, 404);
+        return json({ id, visibility: truth.visibility, private: truth.visibility !== "public", full_name: fullName || undefined });
       }
       if (m) {
         if (gh.rateLimited) return new Response(JSON.stringify({ message: "API rate limit exceeded" }), { status: 403, headers: { "x-ratelimit-remaining": "0" } });
@@ -195,6 +254,11 @@ export interface Harness {
   /** run the real /login + /auth/callback round trip as this GitHub user; returns the session cookie ("name=value") */
   signIn(user: { id: number; login: string }, repoIds?: number[]): Promise<string>;
   setJwks(keys: Jwk[]): void;
+  /**
+   * Configure the GitHub App (GITHUB_APP_ID + GITHUB_APP_PRIVATE_KEY_B64) with a fresh RSA key, installed on these owners.
+   * `pem`: what GitHub hands out ("pkcs1" = BEGIN RSA PRIVATE KEY, the default) or the PKCS#8 form.
+   */
+  enableApp(installs: Record<string, number | { id: number; type: "Organization" | "User" }>, pem?: "pkcs1" | "pkcs8"): Promise<{ pkcs8: Uint8Array; pkcs1: Uint8Array; publicKey: CryptoKey }>;
   token(over?: Record<string, unknown>, key?: KeyPair, header?: Record<string, unknown>): Promise<string>;
   call(method: string, path: string, opts?: CallOpts): Promise<Res>;
   app: ReturnType<typeof buildApp>;
@@ -208,6 +272,7 @@ export interface CallOpts {
 }
 
 export async function makeHarness(jwksOpts: { minRefetchMs?: number } = { minRefetchMs: 0 }): Promise<Harness> {
+  resetAppCaches();
   const key = await makeKeyPair("kid-1");
   const clock = { t: T0 };
   const jwksFetches = { n: 0 };
@@ -234,6 +299,8 @@ export async function makeHarness(jwksOpts: { minRefetchMs?: number } = { minRef
     PUBLIC_BASE_URL: "https://reports.atomi.cloud",
     GITHUB_CLIENT_ID: "Iv1.testclient",
     GITHUB_CLIENT_SECRET: "test-client-secret",
+    GITHUB_APP_ID: "",
+    GITHUB_APP_PRIVATE_KEY_B64: "",
     SESSION_KEY: Buffer.from(crypto.getRandomValues(new Uint8Array(32))).toString("base64"),
   } satisfies Env;
   const app = buildApp({ jwks, now: () => clock.t, fetch: gh.fetch });
@@ -265,6 +332,20 @@ export async function makeHarness(jwksOpts: { minRefetchMs?: number } = { minRef
     },
     setJwks: (k) => {
       keys = k;
+    },
+    async enableApp(installs, pem = "pkcs1") {
+      resetAppCaches();
+      const pair = (await crypto.subtle.generateKey({ name: "RSASSA-PKCS1-v1_5", modulusLength: 2048, publicExponent: new Uint8Array([1, 0, 1]), hash: "SHA-256" }, true, ["sign", "verify"])) as CryptoKeyPair;
+      const pkcs8 = new Uint8Array(await crypto.subtle.exportKey("pkcs8", pair.privateKey));
+      const pkcs1 = pkcs8.slice(26); // 2048-bit key: fixed 26-byte PKCS#8 header (SEQ, version, rsaEncryption, OCTET STRING)
+      const wrap = (label: string, der: Uint8Array) => `-----BEGIN ${label}-----\n${Buffer.from(der).toString("base64").replace(/.{64}/g, "$&\n")}\n-----END ${label}-----\n`;
+      const text = pem === "pkcs1" ? wrap("RSA PRIVATE KEY", pkcs1) : wrap("PRIVATE KEY", pkcs8);
+      env.GITHUB_APP_ID = gh.app.id;
+      env.GITHUB_APP_PRIVATE_KEY_B64 = Buffer.from(text).toString("base64");
+      gh.app.publicKey = pair.publicKey;
+      gh.app.installs.clear();
+      for (const [owner, v] of Object.entries(installs)) gh.app.installs.set(owner.toLowerCase(), typeof v === "number" ? { id: v, type: "Organization" } : v);
+      return { pkcs8, pkcs1, publicKey: pair.publicKey };
     },
     token: (over = {}, k = key, header = {}) => signJwt(k, { ...baseClaims(clock.t), ...over }, header),
     async call(method, path, opts = {}) {

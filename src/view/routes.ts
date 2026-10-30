@@ -1,6 +1,6 @@
 import type { Context, Hono } from "hono";
 import { HttpError } from "../http";
-import { SESSION_COOKIE, authConfigured, loadSession, readCookie, userCanSee, type AuthDeps, type Session } from "../session";
+import { SESSION_COOKIE, loadSession, readCookie, userCanSee, type AuthDeps, type Session } from "../session";
 import { checkRepoVisibility, visStale } from "../visibility";
 import { CSS, LINE_JS } from "./assets";
 import { badge } from "./badge";
@@ -69,7 +69,7 @@ export function mountViewer(app: Hono<any>, deps: AuthDeps) {
   });
 
   /** a public repo is only trusted while GitHub confirmed it recently; an older mark is re-checked first (and the cron does it too) */
-  const fresh = (c: Context<V>, repo: Repo) => repo.visibility !== "public" || !authConfigured(c.env) || !visStale(repo, deps.now());
+  const fresh = (c: Context<V>, repo: Repo) => repo.visibility !== "public" || !visStale(repo, deps.now());
 
   /**
    * "yes": public (and recently confirmed), or the signed-in user's own GitHub token gets in. "no": looks exactly like

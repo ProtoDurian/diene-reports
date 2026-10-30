@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, test } from "bun:test";
 import { CRON_VISIBILITY, runCron } from "../src/cron";
-import { DAY, HOUR } from "../src/env";
+import { HOUR } from "../src/env";
 import { safeNext } from "../src/session";
 import { VIS_FRESH_MS } from "../src/visibility";
 import { finishN, makeHarness, type Harness } from "./harness";
@@ -22,7 +22,8 @@ const SESSION = "__Host-diene_session";
 const STATE = "__Host-diene_state";
 const rows = async (sql: string) => (await h.env.DB.prepare(sql).all<any>()).results;
 const repoRow = async (id: number) => (await rows(`SELECT * FROM repos WHERE repo_id = ${id}`))[0];
-const basicCalls = () => h.gh.calls.filter((c) => c.auth?.startsWith("Basic ") && c.method === "GET");
+/** GitHub lookups made by the visibility check (not the signed-in user's own token checks) */
+const visCalls = () => h.gh.calls.filter((c) => c.method === "GET" && c.url.includes("/repositories/") && !c.auth?.startsWith("Bearer ghu_"));
 const sweep = () => runCron(h.env, CRON_VISIBILITY, h.clock.t, h.gh.fetch) as Promise<{ checked: number; changed: number; skipped: number }>;
 const pagesOf = (p: string) => [p, `${p}/commit/${sha(1)}`, `${p}/commit/${sha(1)}/coverage`, `${p}/commit/${sha(1)}/file?path=src/a.ts`, `${p}/run/5001/tests`, `${p}/run/5001/raw/x`, `${p}/pull/1`, `${p}/test/x`];
 
@@ -127,12 +128,12 @@ describe("logout also revokes the token at GitHub", () => {
 });
 
 describe("visibility cron", () => {
-  test("is its own trigger and sends the App's client id + secret as Basic auth", async () => {
+  test("is its own trigger and, with no App configured, asks GitHub unauthenticated", async () => {
     const r = await sweep();
     expect(r.checked).toBe(2);
-    const calls = basicCalls();
+    const calls = visCalls();
     expect(calls).toHaveLength(2);
-    for (const c of calls) expect(c.auth).toBe(`Basic ${btoa("Iv1.testclient:test-client-secret")}`);
+    for (const c of calls) expect(c.auth).toBeNull();
     expect(calls.map((c) => c.url).sort()).toEqual([`https://api.github.com/repositories/${PUB_ID}`, `https://api.github.com/repositories/${PRIV_ID}`]);
   });
 
@@ -195,13 +196,7 @@ describe("visibility cron", () => {
     const { VIS_BATCH } = await import("../src/visibility");
     expect(VIS_BATCH).toBeGreaterThanOrEqual(2);
     await sweep();
-    expect(basicCalls()[0]!.url).toContain(`/repositories/${PRIV_ID}`);
-  });
-
-  test("does nothing when sign-in is not configured", async () => {
-    const r = await runCron({ ...h.env, GITHUB_CLIENT_SECRET: "" }, CRON_VISIBILITY, h.clock.t, h.gh.fetch);
-    expect(r).toEqual({ checked: 0, changed: 0, skipped: 0 });
-    expect(h.gh.calls).toHaveLength(0);
+    expect(visCalls()[0]!.url).toContain(`/repositories/${PRIV_ID}`);
   });
 
   test("a CI upload (GitHub's own token) counts as a fresh confirmation", async () => {
@@ -212,26 +207,26 @@ describe("visibility cron", () => {
 });
 
 describe("a stale public mark is re-checked before serving", () => {
-  test("within 2 h nothing is asked; after 2 h one call, then cached", async () => {
+  test("within 6 h nothing is asked; after 6 h one call, then cached", async () => {
     h.clock.t += VIS_FRESH_MS - 1000;
     for (const p of pagesOf(demo)) await h.view(p);
-    expect(basicCalls()).toHaveLength(0);
+    expect(visCalls()).toHaveLength(0);
     h.clock.t += 2000;
     expect((await h.view(demo)).status).toBe(200);
-    expect(basicCalls()).toHaveLength(1);
+    expect(visCalls()).toHaveLength(1);
     for (const p of pagesOf(demo)) await h.view(p);
-    expect(basicCalls()).toHaveLength(1);
+    expect(visCalls()).toHaveLength(1);
   });
 
   test("if it turned private meanwhile, every route is the unknown-repo 404 and the row is updated", async () => {
-    h.clock.t += 3 * HOUR;
+    h.clock.t += 7 * HOUR;
     h.gh.repos.set(PUB_ID, { visibility: "private" });
     for (const p of pagesOf(demo)) expect(`${p} ${(await h.view(p)).status}`).toBe(`${p} 404`);
     expect((await repoRow(PUB_ID)).visibility).toBe("private");
   });
 
   test("a signed-in user who GitHub lets in still sees it, a stranger does not", async () => {
-    h.clock.t += 3 * HOUR;
+    h.clock.t += 7 * HOUR;
     h.gh.repos.set(PUB_ID, { visibility: "private" });
     const ok = await h.signIn(alice, [PUB_ID]);
     const no = await h.signIn({ id: 43, login: "bob" }, []);
@@ -240,7 +235,7 @@ describe("a stale public mark is re-checked before serving", () => {
   });
 
   test("when GitHub cannot confirm it, the repo is not served anonymously (try again), and nothing is stored", async () => {
-    h.clock.t += 3 * HOUR;
+    h.clock.t += 7 * HOUR;
     const before = await repoRow(PUB_ID);
     for (const set of [() => h.gh.repos.set(PUB_ID, { status: 502 }), () => h.gh.repos.set(PUB_ID, { status: 403 }), () => ((h.gh.down = true), h.gh.repos.delete(PUB_ID))]) {
       set();
@@ -255,17 +250,11 @@ describe("a stale public mark is re-checked before serving", () => {
   });
 
   test("the home page hides a stale public repo that turned private", async () => {
-    h.clock.t += 3 * HOUR;
+    h.clock.t += 7 * HOUR;
     h.gh.repos.set(PUB_ID, { visibility: "private" });
     expect((await h.view("/")).text).not.toContain("ProtoDurian/demo");
   });
 
-  test("unconfigured sign-in: staleness cannot be checked, so nothing changes", async () => {
-    h.clock.t += 30 * DAY;
-    const res = await h.app.request(demo, {}, { ...h.env, GITHUB_CLIENT_SECRET: "" });
-    expect(res.status).toBe(200);
-    expect(h.gh.calls).toHaveLength(0);
-  });
 });
 
 describe("the gated repo is looked up once", () => {

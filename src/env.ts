@@ -9,6 +9,10 @@ export interface Env {
   /** secrets: `wrangler secret put` */
   GITHUB_CLIENT_SECRET: string;
   SESSION_KEY: string;
+  /** GitHub App id (var). With the key below, visibility checks run as the App's installation. */
+  GITHUB_APP_ID: string;
+  /** secret: base64 of the PEM private key GitHub lets you download for the App (PKCS#1 or PKCS#8) */
+  GITHUB_APP_PRIVATE_KEY_B64: string;
 }
 
 export const ISSUER = "https://token.actions.githubusercontent.com";
