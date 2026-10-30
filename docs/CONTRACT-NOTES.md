@@ -63,3 +63,17 @@
 23. **`workers.dev` deviation from CONTRACT §0.** `workers_dev` is `false`, so the Worker is **not** reachable at
     `diene-reports.kirinnee.workers.dev` (that host sits outside Cloudflare Access). Only `reports.atomi.cloud` serves it.
     The viewer additionally verifies the `Cf-Access-Jwt-Assertion` JWT itself (vars `ACCESS_TEAM_DOMAIN`, `ACCESS_AUD`) and answers `403` without it.
+
+## Viewer (PR 2)
+
+24. **Flag chooser, no cross-flag merge.** `/commit/<sha>/coverage` without `?flag=` and with several flags shows a chooser
+    instead of merging flags (each flag measures a different test run).
+25. **`tests` badge name is reserved.** `/badge/<o>/<r>/tests.svg` is the pass/fail badge; a coverage flag called `tests`
+    has no badge. Other flags give coverage badges. Unknown repo/branch/flag → grey "unknown"; private repo → grey "private".
+26. **Raw downloads** are served by run id: `/<owner>/<repo>/run/<id>/raw/<name>`, gunzipped, `Content-Disposition: attachment`,
+    `application/octet-stream`, CSP `default-src 'none'; sandbox`.
+27. **Changed lines on the file page** come from the report's `diff.files` when the stored report is ≤ 6 MB; above that, only
+    the patch's uncovered changed lines are marked. Source and report expire from R2 (90 d); the page then links to GitHub.
+28. **Commit/PR pages** list the worst state first (tests failed, errored, timed out, lost, cancelled, no report, running,
+    inactive, passed), then by flag name. For a commit the pages use the latest attempt per job.
+29. **Times** are shown in UTC. Coverage colours: ≥ 80 % green, ≥ 60 % amber, else red.

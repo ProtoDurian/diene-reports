@@ -59,6 +59,9 @@ curl -si https://reports.atomi.cloud/api/v1/runs/known-failing?flag=x   # 401 wi
 ## Local
 
 ```sh
-wrangler d1 migrations apply diene_reports --local
-wrangler dev
+bun run seed                 # fills local D1 + R2 with every outcome class (demo-app, PR #7, a private repo)
+wrangler dev --local          # open http://localhost:8787/ProtoDurian/demo-app/commit/0000000000000000000000000000000000000003
 ```
+
+The seed runs the real API against in-memory shims and copies the result into the local wrangler state.
+Screenshots of the commit page: `docs/screenshots/`.

@@ -6,6 +6,7 @@
     "typecheck": "tsc --noEmit",
     "test": "bun test",
     "dev": "wrangler dev",
+    "seed": "bun scripts/seed.ts",
     "deploy": "wrangler deploy"
   },
   "dependencies": {
