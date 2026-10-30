@@ -65,6 +65,79 @@ export const baseClaims = (nowMs: number): Record<string, unknown> => ({
   workflow: "CI",
 });
 
+// ------------------------------------------------------------- fake GitHub
+
+export interface FakeGithub {
+  fetch: (url: string, init?: RequestInit) => Promise<Response>;
+  calls: { method: string; url: string; auth: string | null; body: any }[];
+  users: Map<number, { id: number; login: string; repos: Set<number> }>;
+  /** every token pair handed out so far: access -> user id */
+  tokens: Map<string, number>;
+  /** user the next code exchange signs in */
+  nextUser: number;
+  /** seconds until an access token expires */
+  accessTtl: number;
+  /** make refresh requests fail the way GitHub does (HTTP 200 + error body) */
+  refreshFails: boolean;
+  /** GitHub is unreachable */
+  down: boolean;
+  count(match: string): number;
+}
+
+export function makeFakeGithub(now: () => number): FakeGithub {
+  let n = 0;
+  const refreshTokens = new Map<string, number>();
+  const gh: FakeGithub = {
+    calls: [],
+    users: new Map(),
+    tokens: new Map(),
+    nextUser: 0,
+    accessTtl: 8 * 3600,
+    refreshFails: false,
+    down: false,
+    count: (match) => gh.calls.filter((c) => c.url.includes(match)).length,
+    fetch: async (url, init = {}) => {
+      const h = new Headers(init.headers);
+      const body = typeof init.body === "string" ? JSON.parse(init.body) : null;
+      gh.calls.push({ method: init.method ?? "GET", url, auth: h.get("authorization"), body });
+      if (gh.down) throw new Error("network down");
+      const json = (o: unknown, status = 200) => new Response(JSON.stringify(o), { status, headers: { "content-type": "application/json" } });
+      const issue = (uid: number) => {
+        n++;
+        const access = `ghu_access${n}`;
+        const refresh = `ghr_refresh${n}`;
+        gh.tokens.set(access, uid);
+        refreshTokens.set(refresh, uid);
+        return { access_token: access, refresh_token: refresh, expires_in: gh.accessTtl, refresh_token_expires_in: 15811200, token_type: "bearer" };
+      };
+      if (url === "https://github.com/login/oauth/access_token") {
+        if (body.client_secret !== "test-client-secret" || body.client_id !== "Iv1.testclient") return json({ error: "incorrect_client_credentials" });
+        if (body.grant_type === "refresh_token") {
+          const uid = refreshTokens.get(body.refresh_token);
+          if (gh.refreshFails || uid === undefined) return json({ error: "bad_refresh_token" });
+          refreshTokens.delete(body.refresh_token); // single use, like GitHub
+          return json(issue(uid));
+        }
+        if (body.code !== `code-${gh.nextUser}` || !gh.users.has(gh.nextUser)) return json({ error: "bad_verification_code" });
+        return json(issue(gh.nextUser));
+      }
+      const uid = gh.tokens.get((h.get("authorization") ?? "").replace(/^Bearer /, ""));
+      if (url === "https://api.github.com/user") {
+        if (uid === undefined) return json({ message: "Bad credentials" }, 401);
+        const u = gh.users.get(uid)!;
+        return json({ id: u.id, login: u.login, avatar_url: `https://avatars.githubusercontent.com/u/${u.id}?v=4` });
+      }
+      const m = /^https:\/\/api\.github\.com\/repositories\/(\d+)$/.exec(url);
+      if (m) {
+        if (uid === undefined) return json({ message: "Bad credentials" }, 401);
+        return gh.users.get(uid)!.repos.has(Number(m[1])) ? json({ id: Number(m[1]) }) : json({ message: "Not Found" }, 404);
+      }
+      return json({}, 404);
+    },
+  };
+  return gh;
+}
+
 export const gz = (data: string | Uint8Array): Uint8Array => new Uint8Array(gzipSync(data));
 export const gitSha = (content: string | Uint8Array): string => {
   const buf = typeof content === "string" ? Buffer.from(content) : Buffer.from(content);
@@ -84,11 +157,11 @@ export interface Harness {
   clock: { t: number };
   key: KeyPair;
   jwksFetches: { n: number };
-  accessKey: KeyPair;
-  /** a valid Cloudflare Access JWT for the viewer; override claims to break it */
-  accessToken(over?: Record<string, unknown>, key?: KeyPair): Promise<string>;
-  /** GET a viewer path as a signed-in Access user (token: null sends none) */
-  view(path: string, opts?: { token?: string | null; headers?: Record<string, string> }): Promise<{ status: number; headers: Headers; text: string }>;
+  gh: FakeGithub;
+  /** GET a viewer path; pass `cookie` (from signIn) to be a signed-in user */
+  view(path: string, opts?: { cookie?: string | null; headers?: Record<string, string> }): Promise<{ status: number; headers: Headers; text: string }>;
+  /** run the real /login + /auth/callback round trip as this GitHub user; returns the session cookie ("name=value") */
+  signIn(user: { id: number; login: string }, repoIds?: number[]): Promise<string>;
   setJwks(keys: Jwk[]): void;
   token(over?: Record<string, unknown>, key?: KeyPair, header?: Record<string, unknown>): Promise<string>;
   call(method: string, path: string, opts?: CallOpts): Promise<Res>;
@@ -115,8 +188,7 @@ export async function makeHarness(jwksOpts: { minRefetchMs?: number } = { minRef
     () => clock.t,
     jwksOpts,
   );
-  const accessKey = await makeKeyPair("access-kid");
-  const accessJwks = new JwksCache(async () => ({ keys: [accessKey.jwk] }), () => clock.t, { minRefetchMs: 0 });
+  const gh = makeFakeGithub(() => clock.t);
   const db = new D1Shim();
   const r2 = new R2Shim();
   const env = {
@@ -125,10 +197,11 @@ export async function makeHarness(jwksOpts: { minRefetchMs?: number } = { minRef
     ALLOWED_OWNER_IDS: "349664883,55664364",
     OIDC_AUDIENCE: "diene-reports",
     PUBLIC_BASE_URL: "https://reports.atomi.cloud",
-    ACCESS_TEAM_DOMAIN: "https://atomicloud.cloudflareaccess.com",
-    ACCESS_AUD: "ab2d52e241e575a8c4df3db1476312906c0e85dc63f675880faa9b15a44423df",
+    GITHUB_CLIENT_ID: "Iv1.testclient",
+    GITHUB_CLIENT_SECRET: "test-client-secret",
+    SESSION_KEY: Buffer.from(crypto.getRandomValues(new Uint8Array(32))).toString("base64"),
   } satisfies Env;
-  const app = buildApp({ jwks, now: () => clock.t, accessJwks });
+  const app = buildApp({ jwks, now: () => clock.t, fetch: gh.fetch });
   const h: Harness = {
     db,
     r2,
@@ -136,16 +209,24 @@ export async function makeHarness(jwksOpts: { minRefetchMs?: number } = { minRef
     clock,
     key,
     jwksFetches,
-    accessKey,
+    gh,
     app,
-    accessToken: (over = {}, k = accessKey) =>
-      signJwt(k, { iss: env.ACCESS_TEAM_DOMAIN, aud: [env.ACCESS_AUD], iat: Math.floor(clock.t / 1000), nbf: Math.floor(clock.t / 1000), exp: Math.floor(clock.t / 1000) + 3600, email: "dev@example.com", ...over }),
     async view(path, opts = {}) {
       const headers: Record<string, string> = { ...(opts.headers ?? {}) };
-      const tok = opts.token === undefined ? await h.accessToken() : opts.token;
-      if (tok !== null) headers["cf-access-jwt-assertion"] = tok;
+      if (opts.cookie) headers.cookie = opts.cookie;
       const res = await app.request(path, { headers }, env);
       return { status: res.status, headers: res.headers, text: await res.text() };
+    },
+    async signIn(user, repoIds = []) {
+      gh.users.set(user.id, { ...user, repos: new Set(repoIds) });
+      gh.nextUser = user.id;
+      const start = await app.request("/login?next=/", {}, env);
+      const stateCookie = /__Host-diene_state=([^;]+)/.exec(start.headers.get("set-cookie") ?? "")![1]!;
+      const state = new URL(start.headers.get("location")!).searchParams.get("state")!;
+      const cb = await app.request(`/auth/callback?code=code-${user.id}&state=${state}`, { headers: { cookie: `__Host-diene_state=${stateCookie}` } }, env);
+      const m = /(__Host-diene_session=[^;]+)/.exec(cb.headers.get("set-cookie") ?? "");
+      if (!m) throw new Error(`sign-in failed: ${cb.status}`);
+      return m[1]!;
     },
     setJwks: (k) => {
       keys = k;

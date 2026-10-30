@@ -19,73 +19,10 @@ async function fullRun(n: number, o: Parameters<typeof summary>[0] = {}, report?
 }
 const sha = (n: number) => n.toString(16).padStart(40, "0");
 
-describe("#4 Cloudflare Access guard", () => {
-  test("a valid Access JWT opens the viewer", async () => {
-    await finishN(h, 1);
-    expect((await h.view("/")).status).toBe(200);
-    expect((await h.view("/assets/app.css")).status).toBe(200);
-    expect((await h.view(`${base}/commit/${sha(1)}`)).status).toBe(200);
-  });
-
-  test("no header, junk, wrong audience, wrong issuer, expired and foreign-key tokens are all 403", async () => {
-    await finishN(h, 1);
-    const paths = ["/", "/assets/app.css", "/assets/line.js", base, `${base}/commit/${sha(1)}`, `${base}/pull/1`, "/nope", `${base}/run/1/raw/x`, `${base}/run/1/tests`];
-    const exp = Math.floor(h.clock.t / 1000);
-    const bad: (string | null)[] = [
-      null,
-      "",
-      "garbage",
-      "a.b.c",
-      await h.accessToken({ aud: ["someone-else"] }),
-      await h.accessToken({ aud: "someone-else" }),
-      await h.accessToken({ iss: "https://evil.cloudflareaccess.com" }),
-      await h.accessToken({ exp: exp - 3600 }),
-      await h.accessToken({ nbf: exp + 3600 }),
-      await h.accessToken({}, await makeKeyPair("access-kid")),
-      await h.token(), // a GitHub OIDC token is not an Access token
-    ];
-    for (const p of paths) {
-      for (const t of bad) {
-        const r = await h.view(p, { token: t });
-        expect(`${p} ${r.status}`).toBe(`${p} 403`);
-        expect(r.text).not.toContain("demo");
-      }
-    }
-  });
-
-  test("an alg:none or HS256 forgery is rejected", async () => {
-    const b64 = (o: unknown) => Buffer.from(JSON.stringify(o)).toString("base64url");
-    const claims = { iss: h.env.ACCESS_TEAM_DOMAIN, aud: [h.env.ACCESS_AUD], exp: Math.floor(h.clock.t / 1000) + 600 };
-    for (const alg of ["none", "HS256"]) {
-      const t = `${b64({ alg, kid: "access-kid" })}.${b64(claims)}.`;
-      expect((await h.view("/", { token: t })).status).toBe(403);
-    }
-  });
-
-  test("fails closed when the Access config is missing", async () => {
-    const env = { ...h.env, ACCESS_AUD: "" };
-    const res = await h.app.request("/", { headers: { "cf-access-jwt-assertion": await h.accessToken() } }, env);
-    expect(res.status).toBe(403);
-  });
-
-  test("the API, healthz and badges keep their own rules (no Access JWT needed)", async () => {
-    await finishN(h, 1);
-    expect((await h.view("/healthz", { token: null })).status).toBe(200);
-    expect((await h.view("/api/v1/runs/start", { token: null })).status).toBe(401);
-    expect((await h.view("/badge/ProtoDurian/demo/unit.svg", { token: null })).status).toBe(200);
-  });
-
-  test("owners named like an exempt prefix do not bypass the guard", async () => {
-    for (const p of ["/api/x/pull/1", "/badge/x/y", "/badge/x/y/z/w", "/api/v2/x"]) {
-      expect(`${p} ${(await h.view(p, { token: null })).status}`).toBe(`${p} 403`);
-    }
-  });
-});
-
 describe("#1 badges and heads survive a newer run that has no data", () => {
   test("coverage and tests badges stay while the next run is only started or was cancelled", async () => {
     await finishN(h, 1, { coverage: covOf(100, 92) });
-    const badge = async (f: string) => (await h.view(`/badge/ProtoDurian/demo/${f}.svg`, { token: null })).text;
+    const badge = async (f: string) => (await h.view(`/badge/ProtoDurian/demo/${f}.svg`)).text;
     expect(await badge("unit")).toContain("92.0%");
     await startRun(h, runClaims(2));
     expect(await badge("unit")).toContain("92.0%");

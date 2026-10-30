@@ -39,8 +39,8 @@ coverage viewer. it should account for: failed tests, failed test run, and still
    diene.all node branch is its own project) / commit / PR: failures with message,
    stack and `file:line`; failed-run banner; new-failure and flaky marks against the base; coverage totals, file
    list, line view; patch (diff) coverage on PRs; SVG badges to replace the Codecov README badges.
-10. **Access:** whole viewer behind Cloudflare Access (free up to 50 users, GitHub login). Ingest and badge paths
-    bypass Access (OIDC protects ingest; badges show numbers only).
+10. **Access:** *superseded 2026-10-30.* The viewer has its own "Sign in with GitHub" (see §5.1); there is no Cloudflare Access.
+    Ingest stays on OIDC; badges show numbers only.
 11. **Cost:** **Workers Paid ($5/month) recommended.** Free can work only with care (10 ms CPU, 50 D1 queries per
     request, 10 ms cron); Paid removes all three. R2 stays at or just over its free 10 GB with 30-day raw and
     90-day report retention (cents per month if over).
@@ -456,7 +456,7 @@ uploads/day**, ~3 requests each.
 **Estimate: $0/month on Free; $5/month on Workers Paid.** Recommendation: **Paid** — the design is kept inside Free's
 limits (bulk writes, no parsing, date-based GC), but Paid removes the 10 ms / 50-query edges for $5, and nothing in
 the design changes either way.
-Cloudflare Access: $0 for ≤ 50 users.
+Sign-in: no extra cost (D1 rows, a few GitHub API calls).
 
 ## 5. Viewer UI
 
@@ -483,16 +483,16 @@ PR feedback inside GitHub:
 
 ### 5.1 Access
 
-**Recommendation:** put the whole viewer hostname behind **Cloudflare Access** (Zero Trust, free ≤ 50 users) with
-GitHub as the identity provider and an allow-list of the owner's accounts. Add **bypass** policies for
-`/api/v1/*` (protected by OIDC instead) and `/badge/*` (numbers only, and only for repos whose stored visibility is
-`public`; private repos return a grey "private" badge).
+*Rewritten 2026-10-30 (owner decision: no VPN, no Zero Trust, behave like a full SaaS).*
 
-Access can protect a `*.workers.dev` hostname directly, so a custom zone is optional [R:n6].
+The viewer is public-facing with its own login, like Codecov:
 
-Why not "public for public repos" in v1: it needs per-page visibility checks and makes a mistake leak private source
-(the line view serves source). Turning on public read for public repos is a later, contained change (a
-`visibility = 'public'` check on every page + a second Access policy).
+- **Sign in with GitHub** through a GitHub App's user authorization (`/login`, `/auth/callback`, `POST /logout`).
+  Sessions live in D1; the cookie holds only a random id and the GitHub tokens are stored AES-GCM encrypted.
+- **Public repos** (stored `visibility = 'public'`) are visible to anyone. **Private and internal repos** are visible only to a
+  signed-in user for whom GitHub (asked with that user's own token, cached 10 minutes) returns the repo.
+  Everyone else gets the same 404 page as for an unknown repo, so a private repo's existence is never confirmed.
+- `/api/v1/*` stays on GitHub OIDC; `/badge/*` shows numbers only (private repos: grey "private").
 
 ## 6. Migration from Codecov
 
@@ -542,7 +542,7 @@ Steps 2 and 3 can be one patch if the owner prefers speed over a shadow period; 
 - Report content is untrusted text: escape everything on render (test names and messages can contain HTML); the
   line view renders source as text, never as HTML. Strict CSP: `default-src 'self'`.
 - Limits per token: max uploads per `run_id` (e.g. 50) to stop a loop from filling R2.
-- Raw files are served only to Access-authenticated users, with `Content-Disposition: attachment`.
+- Raw files follow the same repo visibility rules as every other viewer page, with `Content-Disposition: attachment`.
 - The Worker URL is not secret; the OIDC check is the gate. Rate limiting via a Workers rate-limit binding on
   `/api/v1/*`.
 
@@ -575,10 +575,9 @@ Steps 2 and 3 can be one patch if the owner prefers speed over a shadow period; 
 
 ## 10. Decisions the owner should make (with recommendations)
 
-1. **Domain / hostname** — a subdomain on a zone already in the Cloudflare account, or plain `*.workers.dev` (Access
-   can protect it directly).
+1. **Domain / hostname** — a subdomain on a zone already in the Cloudflare account.
 2. **Workers plan** — recommend Paid $5/month; Free works but sits close to its CPU/query edges.
-3. **Viewer access** — recommend Access for everything, bypass for ingest + badges (§5.1).
+3. **Viewer access** — built-in GitHub sign-in (§5.1).
 4. **Fork/Dependabot** — recommend artifact-only in v1 (§3.5).
 5. **Shadow period** — recommend 1 week next to Codecov, then remove.
 6. **Action repo home** — recommend **`AtomiCloud/actions.test-report`** (public), next to `actions.setup-nix`, pinned

@@ -1,5 +1,6 @@
 import { DAY, type Env } from "./env";
 import { sweepLost } from "./runs";
+import { gcSessions } from "./session";
 
 export const CRON_SWEEP = "*/15 * * * *";
 export const CRON_GC = "17 3 * * *";
@@ -28,6 +29,8 @@ export async function gc(env: Env, now: number): Promise<{ blobs: number; runs: 
     await env.BUCKET.delete(gone.results.map((r) => `src/${r.repo_id}/${r.blob_sha}`));
     blobs += gone.results.length;
   }
+
+  await gcSessions(env, now);
 
   const cutoff = now - ROW_TTL_DAYS * DAY;
   const old = `SELECT id FROM runs WHERE created_at < ?1 AND id NOT IN (SELECT run_id FROM branch_head)

@@ -30,8 +30,16 @@ function flagChips(runs: RunRow[]): Raw {
 
 // ----------------------------------------------------------------------------- /
 
-export async function homePage(env: Env): Promise<Raw> {
-  const rows = await homeRows(env);
+const MAX_PRIVATE_CHECKS = 30;
+
+/** `canSee` answers for one repo; at most MAX_PRIVATE_CHECKS private repos are looked up per page view so GitHub is never hammered. */
+export async function homePage(env: Env, canSee: (r: { repo_id: number; visibility: string }) => Promise<boolean>): Promise<Raw> {
+  const all = await homeRows(env);
+  const seen = new Map<number, { repo_id: number; visibility: string }>();
+  for (const r of all) seen.set(r.repo_id, { repo_id: r.repo_id, visibility: r.visibility });
+  const priv = [...seen.values()].filter((r) => r.visibility !== "public").slice(0, MAX_PRIVATE_CHECKS);
+  const allowed = new Set<number>(await Promise.all(priv.map(async (r) => ((await canSee(r)) ? r.repo_id : -1))));
+  const rows = all.filter((r) => r.visibility === "public" || allowed.has(r.repo_id));
   const groups = new Map<string, { owner: string; name: string; branch: string; runs: RunRow[] }>();
   for (const r of rows) {
     const k = `${r.owner}/${r.name}\0${r.branch}`;

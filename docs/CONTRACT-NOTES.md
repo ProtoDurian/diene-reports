@@ -61,8 +61,7 @@
 22. **Failure JSON size.** If the failures of one finish exceed ~1.9 MB as JSON (D1 binds at most ~2 MB per value), messages and stacks
     are shortened step by step and a warning is stored. The raw summary in `sum/` is unchanged.
 23. **`workers.dev` deviation from CONTRACT §0.** `workers_dev` is `false`, so the Worker is **not** reachable at
-    `diene-reports.kirinnee.workers.dev` (that host sits outside Cloudflare Access). Only `reports.atomi.cloud` serves it.
-    The viewer additionally verifies the `Cf-Access-Jwt-Assertion` JWT itself (vars `ACCESS_TEAM_DOMAIN`, `ACCESS_AUD`) and answers `403` without it.
+    `diene-reports.kirinnee.workers.dev`. Only `reports.atomi.cloud` serves it.
 
 ## Viewer (PR 2)
 
@@ -77,11 +76,9 @@
 28. **Commit/PR pages** list the worst state first (tests failed, errored, timed out, lost, cancelled, no report, running,
     inactive, passed), then by flag name. For a commit the pages use the latest attempt per job.
 29. **Times** are shown in UTC. Coverage colours: ≥ 80 % green, ≥ 60 % amber, else red.
-30. **The viewer checks Cloudflare Access itself** (review #4). Every route except `/healthz`, `/api/v1/*` and
-    `/badge/<owner>/<repo>/<flag>` needs a valid `Cf-Access-Jwt-Assertion` (RS256, `iss` = ACCESS_TEAM_DOMAIN, `aud` contains
-    ACCESS_AUD, exp/nbf with 60 s skew; keys from `<team>/cdn-cgi/access/certs`). Anything else is 403 (fail closed, also when
-    the vars are empty). `/assets/*` is guarded. An owner named `api` or `badge` cannot bypass it. **Deviation from §0:**
-    `workers_dev` stays `false`; the Worker is only reachable at `reports.atomi.cloud`.
+30. **Cloudflare Access removed** (owner decision 2026-10-30: no VPN, no Zero Trust, act like a full SaaS). The Cf-Access-Jwt
+    guard and the `ACCESS_TEAM_DOMAIN` / `ACCESS_AUD` vars are gone; see notes 39-46 for the replacement.
+    **Deviation from §0:** `workers_dev` stays `false`; the Worker is only reachable at `reports.atomi.cloud`.
 31. **Badges and heads** (review #1). `branch_head` is set on finish only. The tests badge uses the newest finished branch run
     with tests or coverage; the coverage badge uses the newest finished branch run with coverage (`cov_run_id`). A started,
     cancelled or crashed newer run no longer blanks them. Home and repo pages show coverage from that run and say which commit it is from.
@@ -99,3 +96,27 @@
 38. **Test history** lists the runs from the newest to the oldest recorded failure and says "no failure reported" for the
     others, because only failures are stored in D1; an absent or skipped test is not "passed".
 39. **Raw files** are streamed through gzip only when the stored object starts with the gzip magic bytes; otherwise 404.
+
+## Viewer sign-in (2026-10-30)
+
+39. **Login is a GitHub App's user authorization.** `GET /login?next=/path` sets the signed cookie `__Host-diene_state` (random 32-byte
+    state + `next`, HMAC-signed, 10 min) and redirects to `https://github.com/login/oauth/authorize`. `GET /auth/callback` checks the state in
+    constant time, exchanges the code (`GITHUB_CLIENT_SECRET`), reads `GET /user` and starts a session. A bad, missing, forged or expired state
+    is `400`. The state cookie is cleared on every callback. `next` must be a path starting with `/` and not `//` (anything else becomes `/`).
+40. **Sessions** are D1 rows (migration `0004`) keyed by `sha256(session id)`; the cookie `__Host-diene_session` (HttpOnly, Secure,
+    SameSite=Lax, Path=/, 30 days) carries only the random id. Access and refresh tokens are AES-GCM encrypted with a key derived (HKDF) from
+    the secret `SESSION_KEY`, bound to the row by AAD. GitHub App user tokens last ~8 h; they are refreshed on use when they are within
+    60 s of expiry. Refresh tokens are single use, so when two requests race the loser re-reads the row. A rejected refresh deletes the
+    session (= signed out); GitHub being unreachable only signs that one request out. The daily cron deletes expired sessions.
+41. **`POST /logout`** needs an `Origin` equal to the `PUBLIC_BASE_URL` origin (403 otherwise), deletes the row, clears the cookie, `303 /`.
+42. **Who sees what.** Public repo (stored `visibility = 'public'`): everyone. Private/internal: only a signed-in user whose own token gets
+    `200` from GitHub. This applies to every viewer route (repo, commit, PR, coverage, file, test, run tests, raw). Not allowed and not signed
+    in look identical to an unknown repo (404, same text); a signed-out visitor also gets a "Sign in with GitHub" button.
+    **Deviation from the brief:** the check calls `GET /repositories/{repo_id}`, not `/repos/{owner}/{repo}`, so a renamed repo cannot flip the answer.
+43. **Access cache.** `repo_access` caches the yes/no per (GitHub user id, repo id) for 10 min (401/403/404 → no, 200 → yes). A 5xx or network
+    error denies the request and is not cached. Rows older than a day are deleted by the cron.
+44. **Home page** lists public projects for everyone plus private ones the user may see. At most 30 private repos are looked up per page view
+    (the rest are left out until their answers are cached), so GitHub is never hammered.
+45. **Not changed:** `/api/v1/*` (OIDC), `/badge/*` (private → grey "private"), `/healthz`, `/assets/*` (public, no session lookup).
+46. **Header and CSP.** The header shows "Sign in with GitHub" or avatar + login + "Sign out". CSP is unchanged except
+    `img-src 'self' data: https://avatars.githubusercontent.com`. Avatar URLs from any other host are dropped.

@@ -4,18 +4,18 @@ import { runCron } from "./cron";
 import { LIMITS, type Env } from "./env";
 import { HttpError, putBody, readCapped, readJson } from "./http";
 import { guard } from "./db";
+import type { Fetcher } from "./session";
 import { finishRun, knownFailing, ownedRun, startRun } from "./runs";
 import { attribution, checkSources, putSource } from "./sources";
 import { NotFound } from "./view/pages";
 import { mountViewer, viewerErrors } from "./view/routes";
-import { accessGuard, accessJwksFor } from "./view/access";
 import { parseFlag, parseStart, parseSummary } from "./summary";
 
 export interface Deps {
   jwks: JwksProvider;
   now: () => number;
-  /** Cloudflare Access signing keys; tests inject their own */
-  accessJwks?: JwksProvider;
+  /** outbound calls to GitHub for sign-in; tests inject a fake */
+  fetch?: Fetcher;
 }
 
 type App = { Bindings: Env; Variables: { id: Identity } };
@@ -26,7 +26,7 @@ function defaultJwks(): JwksProvider {
 }
 
 export function buildApp(overrides: Partial<Deps> = {}) {
-  const deps: Deps = { jwks: overrides.jwks ?? defaultJwks(), now: overrides.now ?? (() => Date.now()), accessJwks: overrides.accessJwks };
+  const deps: Deps = { jwks: overrides.jwks ?? defaultJwks(), now: overrides.now ?? (() => Date.now()), fetch: overrides.fetch };
   const app = new Hono<App>();
 
   const isApi = (path: string) => path.startsWith("/api/") || path === "/healthz";
@@ -122,7 +122,7 @@ export function buildApp(overrides: Partial<Deps> = {}) {
   });
 
   app.route("/api/v1", api);
-  mountViewer(app, accessGuard((env) => deps.accessJwks ?? accessJwksFor(env, deps.now), deps.now));
+  mountViewer(app, { now: deps.now, fetch: deps.fetch ?? ((u, i) => fetch(u, i)) });
   return app;
 }
 

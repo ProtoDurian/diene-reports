@@ -33,7 +33,7 @@ export const raw = (s: string) => new Raw(s);
 export const enc = encodeURIComponent;
 
 export const CSP =
-  "default-src 'self'; img-src 'self' data:; base-uri 'none'; form-action 'self'; frame-ancestors 'none'; object-src 'none'";
+  "default-src 'self'; img-src 'self' data: https://avatars.githubusercontent.com; base-uri 'none'; form-action 'self'; frame-ancestors 'none'; object-src 'none'";
 
 export function page(title: string, body: Raw, opts: { nav?: Raw; script?: boolean } = {}): Raw {
   return html`<!doctype html>
@@ -47,7 +47,7 @@ export function page(title: string, body: Raw, opts: { nav?: Raw; script?: boole
 ${opts.script ? html`<script src="/assets/line.js" defer></script>` : ""}
 </head>
 <body>
-<header class="top"><a class="brand" href="/">diene reports</a>${opts.nav ?? ""}</header>
+<header class="top"><a class="brand" href="/">diene reports</a>${opts.nav ?? ""}<!--auth--></header>
 <main>${body}</main>
 </body>
 </html>`;

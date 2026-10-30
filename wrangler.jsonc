@@ -19,8 +19,7 @@
     "ALLOWED_OWNER_IDS": "349664883,55664364",
     "OIDC_AUDIENCE": "diene-reports",
     "PUBLIC_BASE_URL": "https://reports.atomi.cloud",
-    "ACCESS_TEAM_DOMAIN": "https://atomicloud.cloudflareaccess.com",
-    "ACCESS_AUD": "ab2d52e241e575a8c4df3db1476312906c0e85dc63f675880faa9b15a44423df"
+    "GITHUB_CLIENT_ID": "TBD"
   },
   "triggers": { "crons": ["*/15 * * * *", "17 3 * * *"] },
   "observability": { "enabled": true }
