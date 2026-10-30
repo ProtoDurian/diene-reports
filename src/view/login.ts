@@ -2,7 +2,7 @@ import type { Context, Hono } from "hono";
 import type { Env } from "../env";
 import { HttpError } from "../http";
 import {
-  SESSION_COOKIE, SESSION_TTL_MS, STATE_COOKIE, authConfigured, createSession, deleteSession, exchangeCode, fetchGithubUser, makeState,
+  SESSION_COOKIE, SESSION_TTL_MS, STATE_COOKIE, authConfigured, createSession, deleteSession, exchangeCode, fetchGithubUser, makeState, revokeToken,
   readCookie, readState, safeNext, setCookie, timingEqual, type AuthDeps, type Session,
 } from "../session";
 import { enc, html, type Raw } from "./html";
@@ -48,6 +48,8 @@ export function mountAuth(v: Hono<V>, deps: AuthDeps) {
       const tokens = await exchangeCode(c.env, deps, code);
       const user = tokens && (await fetchGithubUser(deps, tokens.access));
       if (!tokens || !user) throw new HttpError(400, "GitHub did not accept the sign-in. Please try again.");
+      // signing in again replaces the old session instead of leaving its row (and token) behind
+      await deleteSession(c.env, readCookie(c.req.header("cookie"), SESSION_COOKIE));
       session = await createSession(c.env, deps, user, tokens);
     } catch (e) {
       if (e instanceof HttpError) throw e;
@@ -62,7 +64,9 @@ export function mountAuth(v: Hono<V>, deps: AuthDeps) {
     noStore(c);
     // SameSite=Lax already keeps other sites' forms out; the Origin check is the second lock.
     if (c.req.header("origin") !== new URL(c.env.PUBLIC_BASE_URL).origin) throw new HttpError(403, "Sign-out must be started from this site.");
+    const token = c.get("viewer")?.accessToken;
     await deleteSession(c.env, readCookie(c.req.header("cookie"), SESSION_COOKIE));
+    if (token && authConfigured(c.env)) await revokeToken(c.env, deps, token);
     c.header("Set-Cookie", setCookie(SESSION_COOKIE, "", 0));
     return c.redirect("/", 303);
   });

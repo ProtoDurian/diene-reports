@@ -1,9 +1,11 @@
 import { DAY, type Env } from "./env";
 import { sweepLost } from "./runs";
-import { gcSessions } from "./session";
+import { gcSessions, type Fetcher } from "./session";
+import { sweepVisibility } from "./visibility";
 
 export const CRON_SWEEP = "*/15 * * * *";
 export const CRON_GC = "17 3 * * *";
+export const CRON_VISIBILITY = "*/30 * * * *";
 
 export const SRC_TTL_DAYS = 90;
 export const ROW_TTL_DAYS = 180;
@@ -51,7 +53,8 @@ export async function gc(env: Env, now: number): Promise<{ blobs: number; runs: 
   return { blobs, runs: counted?.n ?? 0 };
 }
 
-export async function runCron(env: Env, cron: string, now = Date.now()): Promise<unknown> {
+export async function runCron(env: Env, cron: string, now = Date.now(), fetcher: Fetcher = (u, i) => fetch(u, i)): Promise<unknown> {
   if (cron === CRON_GC) return gc(env, now);
+  if (cron === CRON_VISIBILITY) return sweepVisibility(env, { fetch: fetcher, now: () => now });
   return { lost: await sweepLost(env.DB, now) };
 }

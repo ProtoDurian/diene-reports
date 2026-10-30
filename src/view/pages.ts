@@ -3,7 +3,7 @@ import {
   banner, chip, commitUrl, covBar, covUrl, fileUrl, prUrl, repoUrl, runCard, runTestsUrl,
 } from "./components";
 import {
-  branchHeads, commitInfo, covTrend, failuresFor, findRepo, homeRows, lastFailure, latestPerJob, prRuns, projectId, projectsOf,
+  branchHeads, commitInfo, covTrend, failuresFor, homeRows, lastFailure, latestPerJob, prRuns, projectId, projectsOf,
   recentCommits, recentPrs, runById, runsForSha, testHistory, testStatsFor, type Repo,
 } from "./data";
 import { bySeverity, effState, fmtDuration, fmtPct, fmtTime, ghBase, ghBlob, ghRun, pct, short, stateInfo, worstState, type RunRow } from "./format";
@@ -12,14 +12,10 @@ import { loadCovChunk, loadReportDiff, loadSource, loadSummary, loadTestList, ty
 
 export class NotFound extends Error {}
 
+export type HomeRepo = Repo;
+
 const crumbs = (repo: Pick<Repo, "owner" | "name">, branch?: string | null) =>
   html`<nav class="crumbs" aria-label="breadcrumb"><a href="${repoUrl(repo.owner, repo.name, branch)}">${repo.owner}/${repo.name}</a></nav>`;
-
-const need = async (env: Env, owner: string, name: string) => {
-  const repo = await findRepo(env, owner, name);
-  if (!repo) throw new NotFound("unknown repository");
-  return repo;
-};
 
 function flagChips(runs: RunRow[]): Raw {
   return html`${runs.map((r) => {
@@ -30,16 +26,24 @@ function flagChips(runs: RunRow[]): Raw {
 
 // ----------------------------------------------------------------------------- /
 
-const MAX_PRIVATE_CHECKS = 30;
+const MAX_GITHUB_CHECKS = 30;
 
-/** `canSee` answers for one repo; at most MAX_PRIVATE_CHECKS private repos are looked up per page view so GitHub is never hammered. */
-export async function homePage(env: Env, canSee: (r: { repo_id: number; visibility: string }) => Promise<boolean>): Promise<Raw> {
+/**
+ * `free`: repos anyone may see without asking GitHub (public and checked recently). `check` asks GitHub about the
+ * rest (private, or public-but-stale). At most MAX_GITHUB_CHECKS repos are checked per page view so GitHub is never
+ * hammered; the others stay hidden (fail closed).
+ */
+export async function homePage(
+  env: Env,
+  access: { free: (r: HomeRepo) => boolean; check: (r: HomeRepo) => Promise<boolean> },
+): Promise<Raw> {
   const all = await homeRows(env);
-  const seen = new Map<number, { repo_id: number; visibility: string }>();
-  for (const r of all) seen.set(r.repo_id, { repo_id: r.repo_id, visibility: r.visibility });
-  const priv = [...seen.values()].filter((r) => r.visibility !== "public").slice(0, MAX_PRIVATE_CHECKS);
-  const allowed = new Set<number>(await Promise.all(priv.map(async (r) => ((await canSee(r)) ? r.repo_id : -1))));
-  const rows = all.filter((r) => r.visibility === "public" || allowed.has(r.repo_id));
+  const seen = new Map<number, HomeRepo>();
+  for (const r of all) seen.set(r.repo_id, { repo_id: r.repo_id, owner: r.owner, name: r.name, visibility: r.visibility, vis_checked_at: r.vis_checked_at, default_branch: null });
+  const open = new Set<number>([...seen.values()].filter(access.free).map((r) => r.repo_id));
+  const toCheck = [...seen.values()].filter((r) => !open.has(r.repo_id)).slice(0, MAX_GITHUB_CHECKS);
+  const allowed = new Set<number>(await Promise.all(toCheck.map(async (r) => ((await access.check(r)) ? r.repo_id : -1))));
+  const rows = all.filter((r) => open.has(r.repo_id) || allowed.has(r.repo_id));
   const groups = new Map<string, { owner: string; name: string; branch: string; runs: RunRow[] }>();
   for (const r of rows) {
     const k = `${r.owner}/${r.name}\0${r.branch}`;
@@ -59,8 +63,7 @@ export async function homePage(env: Env, canSee: (r: { repo_id: number; visibili
 
 // ----------------------------------------------------------------------------- repo
 
-export async function repoPage(env: Env, owner: string, name: string, branchParam: string | null): Promise<Raw> {
-  const repo = await need(env, owner, name);
+export async function repoPage(env: Env, repo: Repo, branchParam: string | null): Promise<Raw> {
   const branches = await projectsOf(env, repo.repo_id);
   const branch = branchParam ?? (repo.default_branch && branches.includes(repo.default_branch) ? repo.default_branch : (branches.find((b) => !b.startsWith("tag:") && !b.startsWith("ref:")) ?? branches[0] ?? null));
   if (!branch) {
@@ -109,9 +112,8 @@ async function cardsFor(env: Env, repo: Repo, runs: RunRow[], testBranch: string
   return runs.map((r, i) => runCard(r, { owner: repo.owner, name: repo.name, failures: fails.get(r.id) ?? [], summary: sums[i] ?? null, testBranch, baseCov: baseCov.get(r.flag) ?? null }));
 }
 
-export async function commitPage(env: Env, owner: string, name: string, sha: string): Promise<Raw> {
+export async function commitPage(env: Env, repo: Repo, sha: string): Promise<Raw> {
   if (!/^[0-9a-f]{40}$/i.test(sha)) throw new NotFound("bad sha");
-  const repo = await need(env, owner, name);
   const all = await runsForSha(env, repo.repo_id, sha);
   const runs = bySeverity(latestPerJob(all));
   if (!runs.length) throw new NotFound("no runs for this commit");
@@ -129,8 +131,7 @@ export async function commitPage(env: Env, owner: string, name: string, sha: str
   );
 }
 
-export async function prPage(env: Env, owner: string, name: string, n: number): Promise<Raw> {
-  const repo = await need(env, owner, name);
+export async function prPage(env: Env, repo: Repo, n: number): Promise<Raw> {
   const all = await prRuns(env, repo.repo_id, n);
   if (!all.length) throw new NotFound("no runs for this pull request");
   const head = all[0]!.head_sha;
@@ -210,8 +211,7 @@ function bestRunWithCoverage(runs: RunRow[], flag: string): RunRow | undefined {
   return runs.find((r) => r.flag === flag && r.cov_lines !== null) ?? runs.find((r) => r.flag === flag);
 }
 
-export async function coveragePage(env: Env, owner: string, name: string, sha: string, flagParam: string | null, sortParam: string | null): Promise<Raw> {
-  const repo = await need(env, owner, name);
+export async function coveragePage(env: Env, repo: Repo, sha: string, flagParam: string | null, sortParam: string | null): Promise<Raw> {
   const runs = latestPerJob(await runsForSha(env, repo.repo_id, sha));
   if (!runs.length) throw new NotFound("no runs for this commit");
   const withCov = runs.filter((r) => r.cov_lines !== null);
@@ -244,9 +244,8 @@ export async function coveragePage(env: Env, owner: string, name: string, sha: s
 
 // ----------------------------------------------------------------------------- file / line view
 
-export async function filePage(env: Env, owner: string, name: string, sha: string, path: string | null, flagParam: string | null): Promise<Raw> {
+export async function filePage(env: Env, repo: Repo, sha: string, path: string | null, flagParam: string | null): Promise<Raw> {
   if (!path) throw new NotFound("missing path");
-  const repo = await need(env, owner, name);
   const runs = latestPerJob(await runsForSha(env, repo.repo_id, sha));
   const run = flagParam ? bestRunWithCoverage(runs, flagParam) : runs.find((r) => r.cov_lines !== null);
   if (!run) throw new NotFound("no coverage run for this commit and flag");
@@ -289,9 +288,8 @@ export async function filePage(env: Env, owner: string, name: string, sha: strin
 
 // ----------------------------------------------------------------------------- test history
 
-export async function testPage(env: Env, owner: string, name: string, testId: string, branchParam: string | null): Promise<Raw> {
+export async function testPage(env: Env, repo: Repo, testId: string, branchParam: string | null): Promise<Raw> {
   if (!/^[A-Za-z0-9_-]{1,64}$/.test(testId)) throw new NotFound("bad test id");
-  const repo = await need(env, owner, name);
   const branches = await projectsOf(env, repo.repo_id);
   const branch = branchParam ?? repo.default_branch ?? branches[0] ?? null;
   const pid = branch ? await projectId(env, repo.repo_id, branch) : null;
@@ -326,8 +324,7 @@ const GROUPS: { status: TestCase["status"]; title: string; open: boolean }[] = [
 ];
 const SHOW_MAX = 2000;
 
-export async function runTestsPage(env: Env, owner: string, name: string, runId: number): Promise<Raw> {
-  const repo = await need(env, owner, name);
+export async function runTestsPage(env: Env, repo: Repo, runId: number): Promise<Raw> {
   const run = await runById(env, repo.repo_id, runId);
   if (!run) throw new NotFound("unknown run");
   const list = await loadTestList(env, run);

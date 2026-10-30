@@ -1,6 +1,7 @@
 import type { Context, Hono } from "hono";
 import { HttpError } from "../http";
-import { SESSION_COOKIE, loadSession, readCookie, userCanSee, type AuthDeps, type Session } from "../session";
+import { SESSION_COOKIE, authConfigured, loadSession, readCookie, userCanSee, type AuthDeps, type Session } from "../session";
+import { checkRepoVisibility, visStale } from "../visibility";
 import { CSS, LINE_JS } from "./assets";
 import { badge } from "./badge";
 import { findRepo, runById, type Repo } from "./data";
@@ -67,15 +68,28 @@ export function mountViewer(app: Hono<any>, deps: AuthDeps) {
     await next();
   });
 
-  /** public repo: anyone. Private: only a signed-in user GitHub lets in. Everything else looks exactly like an unknown repo. */
-  const canSee = (c: Context<V>) => async (repo: Pick<Repo, "repo_id" | "visibility">) => {
-    if (repo.visibility === "public") return true;
+  /** a public repo is only trusted while GitHub confirmed it recently; an older mark is re-checked first (and the cron does it too) */
+  const fresh = (c: Context<V>, repo: Repo) => repo.visibility !== "public" || !authConfigured(c.env) || !visStale(repo, deps.now());
+
+  /**
+   * "yes": public (and recently confirmed), or the signed-in user's own GitHub token gets in. "no": looks exactly like
+   * an unknown repo. "retry": GitHub is rate limiting us or cannot confirm a stale public mark right now.
+   */
+  const access = async (c: Context<V>, repo: Repo): Promise<"yes" | "no" | "retry"> => {
+    let unverified = false;
+    if (!fresh(c, repo)) unverified = (await checkRepoVisibility(c.env, deps, repo)) === null;
+    if (repo.visibility === "public" && !unverified) return "yes";
     const s = viewerOf(c);
-    return s !== null && (await userCanSee(c.env, deps, s, repo.repo_id));
+    if (s !== null) return userCanSee(c.env, deps, s, repo.repo_id);
+    return unverified ? "retry" : "no";
   };
-  const gate = async (c: Context<V>, owner: string, name: string): Promise<void> => {
+  const gate = async (c: Context<V>, owner: string, name: string): Promise<Repo> => {
     const repo = await findRepo(c.env, owner, name);
-    if (!repo || !(await canSee(c)(repo))) throw new NotFound(HIDDEN);
+    if (!repo) throw new NotFound(HIDDEN);
+    const a = await access(c, repo);
+    if (a === "retry") throw new HttpError(503, "GitHub is busy and could not confirm who may see this project. Please try again in a minute.");
+    if (a === "no") throw new NotFound(HIDDEN);
+    return repo;
   };
 
   mountAuth(v, deps);
@@ -103,13 +117,14 @@ export function mountViewer(app: Hono<any>, deps: AuthDeps) {
     return c.body(svg);
   });
 
-  v.get("/", async (c) => sendHtml(c, await homePage(c.env, canSee(c))));
+  v.get("/", async (c) =>
+    sendHtml(c, await homePage(c.env, { free: (r) => r.visibility === "public" && fresh(c, r), check: async (r) => (await access(c, r)) === "yes" })),
+  );
 
   v.get("/:owner/:repo/run/:id/raw/:name", async (c) => {
     const { owner, repo, id, name } = c.req.param();
     if (!NAME_RE.test(name) || !/^\d{1,15}$/.test(id)) throw new NotFound("No such file.");
-    await gate(c, owner, repo);
-    const r = (await findRepo(c.env, owner, repo))!;
+    const r = await gate(c, owner, repo);
     const run = await runById(c.env, r.repo_id, Number(id));
     if (!run) throw new NotFound("Unknown run.");
     const obj = await c.env.BUCKET.get(`raw/${run.repo_id}/${run.sha}/${run.gh_run_id}-${run.gh_run_attempt}/${run.flag}/${name}.gz`);
@@ -125,36 +140,39 @@ export function mountViewer(app: Hono<any>, deps: AuthDeps) {
 
   v.get("/:owner/:repo/run/:id/tests", async (c) => {
     const id = c.req.param("id");
-    await gate(c, c.req.param("owner"), c.req.param("repo"));
+    const repo = await gate(c, c.req.param("owner"), c.req.param("repo"));
     if (!/^\d{1,15}$/.test(id)) throw new NotFound("No such run.");
-    return sendHtml(c, await runTestsPage(c.env, c.req.param("owner"), c.req.param("repo"), Number(id)));
+    return sendHtml(c, await runTestsPage(c.env, repo, Number(id)));
   });
 
   v.get("/:owner/:repo/commit/:sha/coverage", async (c) => {
-    await gate(c, c.req.param("owner"), c.req.param("repo"));
+    const repo = await gate(c, c.req.param("owner"), c.req.param("repo"));
     const sha = guardSha(c.req.param("sha"));
-    return sendHtml(c, await coveragePage(c.env, c.req.param("owner"), c.req.param("repo"), sha, c.req.query("flag") ?? null, c.req.query("sort") ?? null));
+    return sendHtml(c, await coveragePage(c.env, repo, sha, c.req.query("flag") ?? null, c.req.query("sort") ?? null));
   });
   v.get("/:owner/:repo/commit/:sha/file", async (c) => {
-    await gate(c, c.req.param("owner"), c.req.param("repo"));
+    const repo = await gate(c, c.req.param("owner"), c.req.param("repo"));
     const sha = guardSha(c.req.param("sha"));
-    return sendHtml(c, await filePage(c.env, c.req.param("owner"), c.req.param("repo"), sha, c.req.query("path") ?? null, c.req.query("flag") ?? null));
+    return sendHtml(c, await filePage(c.env, repo, sha, c.req.query("path") ?? null, c.req.query("flag") ?? null));
   });
   v.get("/:owner/:repo/commit/:sha", async (c) => {
-    await gate(c, c.req.param("owner"), c.req.param("repo"));
+    const repo = await gate(c, c.req.param("owner"), c.req.param("repo"));
     const sha = guardSha(c.req.param("sha"));
-    return sendHtml(c, await commitPage(c.env, c.req.param("owner"), c.req.param("repo"), sha));
+    return sendHtml(c, await commitPage(c.env, repo, sha));
   });
   v.get("/:owner/:repo/pull/:n", async (c) => {
-    await gate(c, c.req.param("owner"), c.req.param("repo"));
+    const repo = await gate(c, c.req.param("owner"), c.req.param("repo"));
     const n = c.req.param("n");
     if (!/^\d{1,9}$/.test(n)) throw new NotFound("That pull request number does not look right.");
-    return sendHtml(c, await prPage(c.env, c.req.param("owner"), c.req.param("repo"), Number(n)));
+    return sendHtml(c, await prPage(c.env, repo, Number(n)));
   });
-  v.get("/:owner/:repo/test/:id", async (c) => (await gate(c, c.req.param("owner"), c.req.param("repo")), sendHtml(c, await testPage(c.env, c.req.param("owner"), c.req.param("repo"), c.req.param("id"), c.req.query("branch") ?? null))));
+  v.get("/:owner/:repo/test/:id", async (c) => {
+    const repo = await gate(c, c.req.param("owner"), c.req.param("repo"));
+    return sendHtml(c, await testPage(c.env, repo, c.req.param("id"), c.req.query("branch") ?? null));
+  });
   v.get("/:owner/:repo", async (c) => {
-    await gate(c, c.req.param("owner"), c.req.param("repo"));
-    return sendHtml(c, await repoPage(c.env, c.req.param("owner"), c.req.param("repo"), c.req.query("branch") ?? null));
+    const repo = await gate(c, c.req.param("owner"), c.req.param("repo"));
+    return sendHtml(c, await repoPage(c.env, repo, c.req.query("branch") ?? null));
   });
 }
 

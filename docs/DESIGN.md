@@ -366,7 +366,7 @@ fetches the per-file JSON from R2 and the browser renders it. This keeps every r
 ### 4.2 D1 schema (sketch)
 
 ```sql
-repos      (repo_id INTEGER PK, owner TEXT, name TEXT, visibility TEXT, default_branch TEXT, created_at TEXT)
+repos      (repo_id INTEGER PK, owner TEXT, name TEXT, visibility TEXT, default_branch TEXT, created_at TEXT, vis_checked_at INTEGER)
 projects   (project_id INTEGER PK, repo_id, branch TEXT, alias_of INTEGER NULL,   -- [R:M6] project = repo + branch;
             UNIQUE (repo_id, branch))                                         -- diene.all: one per node branch;
                                                                               -- a mirror's main = alias of its node
@@ -492,7 +492,10 @@ The viewer is public-facing with its own login, like Codecov:
 - **Public repos** (stored `visibility = 'public'`) are visible to anyone. **Private and internal repos** are visible only to a
   signed-in user for whom GitHub (asked with that user's own token, cached 10 minutes) returns the repo.
   Everyone else gets the same 404 page as for an unknown repo, so a private repo's existence is never confirmed.
-- `/api/v1/*` stays on GitHub OIDC; `/badge/*` shows numbers only (private repos: grey "private").
+- **The stored visibility can go stale** (a repo made private after its last CI run). Two guards: a cron every 30 min re-asks GitHub
+  (as the App, Basic auth) about the repos confirmed longest ago and fails closed (404/401 → private); and a public repo not confirmed for
+  2 h is re-checked inline before it is served. See CONTRACT-NOTES 47-49.
+- `/api/v1/*` stays on GitHub OIDC; `/badge/*` shows numbers only (private repos look like unknown ones: grey "unknown").
 
 ## 6. Migration from Codecov
 

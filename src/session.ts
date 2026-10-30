@@ -114,7 +114,9 @@ export function safeNext(next: string | null | undefined): string {
   try {
     const u = new URL(next, "http://same.site");
     if (u.origin !== "http://same.site") return "/";
-    return u.pathname + u.search;
+    const out = u.pathname + u.search;
+    // "/.//evil.example" normalises to "//evil.example", which a browser reads as another site
+    return out.startsWith("//") ? "/" : out;
   } catch {
     return "/";
   }
@@ -161,6 +163,7 @@ async function tokenRequest(env: Env, deps: AuthDeps, params: Record<string, str
     headers: { accept: "application/json", "content-type": "application/json", "user-agent": UA },
     body: JSON.stringify({ client_id: env.GITHUB_CLIENT_ID, client_secret: env.GITHUB_CLIENT_SECRET, ...params }),
   });
+  if (res.status >= 500) throw new Error(`GitHub token endpoint ${res.status}`);
   if (!res.ok) return null;
   const b = (await res.json()) as Record<string, unknown>;
   if (typeof b.access_token !== "string" || !b.access_token) return null;
@@ -185,6 +188,14 @@ export async function fetchGithubUser(deps: AuthDeps, token: string): Promise<{ 
   const avatar = typeof u.avatar_url === "string" && /^https:\/\/avatars\.githubusercontent\.com\//.test(u.avatar_url) ? u.avatar_url : null;
   return { id: u.id, login: u.login, avatar };
 }
+
+/** the App itself (client id + secret): a higher rate limit, and it sees public repos only */
+export const ghBasicHeaders = (env: Pick<Env, "GITHUB_CLIENT_ID" | "GITHUB_CLIENT_SECRET">): Record<string, string> => ({
+  authorization: `Basic ${btoa(`${env.GITHUB_CLIENT_ID}:${env.GITHUB_CLIENT_SECRET}`)}`,
+  accept: "application/vnd.github+json",
+  "user-agent": UA,
+  "x-github-api-version": "2022-11-28",
+});
 
 const ghHeaders = (token: string): Record<string, string> => ({
   authorization: `Bearer ${token}`,
@@ -231,6 +242,19 @@ export async function createSession(env: Env, deps: AuthDeps, user: { id: number
     )
     .run();
   return id;
+}
+
+/** best effort: GitHub forgets this user token. Errors are ignored; the session row is gone either way. */
+export async function revokeToken(env: Env, deps: AuthDeps, token: string): Promise<void> {
+  try {
+    await deps.fetch(`https://api.github.com/applications/${encodeURIComponent(env.GITHUB_CLIENT_ID)}/token`, {
+      method: "DELETE",
+      headers: { ...ghBasicHeaders(env), "content-type": "application/json" },
+      body: JSON.stringify({ access_token: token }),
+    });
+  } catch (e) {
+    console.warn("token revoke failed", String(e));
+  }
 }
 
 export async function deleteSession(env: Env, cookieValue: string | null): Promise<void> {
@@ -306,23 +330,25 @@ async function refresh(env: Env, deps: AuthDeps, row: Row): Promise<[Row, string
 
 /**
  * May this signed-in user see the repo? Asks GitHub with the USER's token (by repo id, so renames do not matter)
- * and caches the yes/no for 10 minutes. GitHub being unreachable counts as no and is not cached.
+ * and caches the yes/no for 10 minutes. GitHub being down counts as no (not cached). A rate limit is "retry":
+ * not cached and not an answer, so the page asks the visitor to try again instead of claiming the repo is missing.
  */
-export async function userCanSee(env: Env, deps: AuthDeps, s: Session, repoId: number): Promise<boolean> {
+export async function userCanSee(env: Env, deps: AuthDeps, s: Session, repoId: number): Promise<"yes" | "no" | "retry"> {
   const now = deps.now();
   const hit = await env.DB
     .prepare(`SELECT allowed, checked_at FROM repo_access WHERE user_id = ?1 AND repo_id = ?2`)
     .bind(s.userId, repoId)
     .first<{ allowed: number; checked_at: number }>();
-  if (hit && now - hit.checked_at < ACCESS_CACHE_MS && now >= hit.checked_at) return hit.allowed === 1;
+  if (hit && now - hit.checked_at < ACCESS_CACHE_MS && now >= hit.checked_at) return hit.allowed === 1 ? "yes" : "no";
   let allowed: boolean;
   try {
     const res = await deps.fetch(`https://api.github.com/repositories/${repoId}`, { headers: ghHeaders(s.accessToken) });
     if (res.status === 200) allowed = true;
+    else if (res.status === 429 || (res.status === 403 && (res.headers.get("x-ratelimit-remaining") === "0" || res.headers.has("retry-after")))) return "retry";
     else if (res.status === 404 || res.status === 403 || res.status === 401) allowed = false;
-    else return false;
+    else return "no";
   } catch {
-    return false;
+    return "no";
   }
   await env.DB
     .prepare(
@@ -331,7 +357,7 @@ export async function userCanSee(env: Env, deps: AuthDeps, s: Session, repoId: n
     )
     .bind(s.userId, repoId, allowed ? 1 : 0, now)
     .run();
-  return allowed;
+  return allowed ? "yes" : "no";
 }
 
 export async function gcSessions(env: Env, now: number): Promise<number> {

@@ -427,10 +427,10 @@ describe("who sees what", () => {
     expect(t3).toContain("other-secret");
   });
 
-  test("badges stay public: private shows grey 'private', no GitHub call", async () => {
+  test("badges stay public: private looks like unknown (grey),  no GitHub call", async () => {
     const r = await h.view("/badge/ProtoDurian/secret-svc/unit.svg");
     expect(r.status).toBe(200);
-    expect(r.text).toContain("private");
+    expect(r.text).toContain("unknown");
     expect(h.gh.calls.filter((c) => c.url.includes("/repositories/"))).toHaveLength(0);
   });
 

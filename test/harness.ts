@@ -81,10 +81,18 @@ export interface FakeGithub {
   refreshFails: boolean;
   /** GitHub is unreachable */
   down: boolean;
+  /** what GitHub says about a repo to the App (Basic auth). Unlisted repos answer from our own table, i.e. "nothing changed". */
+  repos: Map<number, { visibility: string; full_name?: string } | { status: number }>;
+  /** user-token repo lookups answer 403 + x-ratelimit-remaining: 0 */
+  rateLimited: boolean;
+  /** the refresh grant answers with this HTTP status (e.g. 502) instead of a normal reply */
+  refreshStatus: number | null;
+  /** DELETE /applications/{id}/token answers with this status */
+  revokeStatus: number;
   count(match: string): number;
 }
 
-export function makeFakeGithub(now: () => number): FakeGithub {
+export function makeFakeGithub(now: () => number, own: (repoId: number) => Promise<{ visibility: string; owner: string; name: string } | null> = async () => null): FakeGithub {
   let n = 0;
   const refreshTokens = new Map<string, number>();
   const gh: FakeGithub = {
@@ -95,6 +103,10 @@ export function makeFakeGithub(now: () => number): FakeGithub {
     accessTtl: 8 * 3600,
     refreshFails: false,
     down: false,
+    repos: new Map(),
+    rateLimited: false,
+    refreshStatus: null,
+    revokeStatus: 204,
     count: (match) => gh.calls.filter((c) => c.url.includes(match)).length,
     fetch: async (url, init = {}) => {
       const h = new Headers(init.headers);
@@ -113,6 +125,7 @@ export function makeFakeGithub(now: () => number): FakeGithub {
       if (url === "https://github.com/login/oauth/access_token") {
         if (body.client_secret !== "test-client-secret" || body.client_id !== "Iv1.testclient") return json({ error: "incorrect_client_credentials" });
         if (body.grant_type === "refresh_token") {
+          if (gh.refreshStatus) return json({ message: "Bad Gateway" }, gh.refreshStatus);
           const uid = refreshTokens.get(body.refresh_token);
           if (gh.refreshFails || uid === undefined) return json({ error: "bad_refresh_token" });
           refreshTokens.delete(body.refresh_token); // single use, like GitHub
@@ -121,14 +134,33 @@ export function makeFakeGithub(now: () => number): FakeGithub {
         if (body.code !== `code-${gh.nextUser}` || !gh.users.has(gh.nextUser)) return json({ error: "bad_verification_code" });
         return json(issue(gh.nextUser));
       }
-      const uid = gh.tokens.get((h.get("authorization") ?? "").replace(/^Bearer /, ""));
+      const mTok = /^https:\/\/api\.github\.com\/applications\/([^/]+)\/token$/.exec(url);
+      if (mTok && init.method === "DELETE") {
+        if (h.get("authorization") !== `Basic ${btoa("Iv1.testclient:test-client-secret")}`) return json({ message: "Bad credentials" }, 401);
+        if (gh.revokeStatus === 204) gh.tokens.delete(body.access_token);
+        return new Response(null, { status: gh.revokeStatus });
+      }
+      const auth = h.get("authorization") ?? "";
+      const uid = gh.tokens.get(auth.replace(/^Bearer /, ""));
       if (url === "https://api.github.com/user") {
         if (uid === undefined) return json({ message: "Bad credentials" }, 401);
         const u = gh.users.get(uid)!;
         return json({ id: u.id, login: u.login, avatar_url: `https://avatars.githubusercontent.com/u/${u.id}?v=4` });
       }
       const m = /^https:\/\/api\.github\.com\/repositories\/(\d+)$/.exec(url);
+      if (m && auth.startsWith("Basic ")) {
+        if (auth !== `Basic ${btoa("Iv1.testclient:test-client-secret")}`) return json({ message: "Bad credentials" }, 401);
+        const id = Number(m[1]);
+        const set = gh.repos.get(id);
+        if (set && "status" in set) return json({ message: "boom" }, set.status);
+        if (set) return json({ id, visibility: set.visibility, private: set.visibility !== "public", full_name: set.full_name ?? undefined });
+        const mine = await own(id);
+        // like GitHub, the App sees public repos only
+        if (!mine || mine.visibility !== "public") return json({ message: "Not Found" }, 404);
+        return json({ id, visibility: "public", private: false, full_name: `${mine.owner}/${mine.name}` });
+      }
       if (m) {
+        if (gh.rateLimited) return new Response(JSON.stringify({ message: "API rate limit exceeded" }), { status: 403, headers: { "x-ratelimit-remaining": "0" } });
         if (uid === undefined) return json({ message: "Bad credentials" }, 401);
         return gh.users.get(uid)!.repos.has(Number(m[1])) ? json({ id: Number(m[1]) }) : json({ message: "Not Found" }, 404);
       }
@@ -188,8 +220,11 @@ export async function makeHarness(jwksOpts: { minRefetchMs?: number } = { minRef
     () => clock.t,
     jwksOpts,
   );
-  const gh = makeFakeGithub(() => clock.t);
   const db = new D1Shim();
+  const gh = makeFakeGithub(
+    () => clock.t,
+    (id) => db.prepare(`SELECT visibility, owner, name FROM repos WHERE repo_id = ?1`).bind(id).first(),
+  );
   const r2 = new R2Shim();
   const env = {
     DB: db as unknown as D1Database,

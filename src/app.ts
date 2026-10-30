@@ -126,6 +126,6 @@ export function buildApp(overrides: Partial<Deps> = {}) {
   return app;
 }
 
-export function scheduled(env: Env, cron: string, now = Date.now()) {
-  return runCron(env, cron, now);
+export function scheduled(env: Env, cron: string, now = Date.now(), fetcher?: Fetcher) {
+  return runCron(env, cron, now, fetcher);
 }

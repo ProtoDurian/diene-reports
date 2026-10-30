@@ -26,7 +26,7 @@ Run it again after every release that adds a file to `migrations/`. Apply it **b
 wrangler deploy
 ```
 
-This sets the custom domain `reports.atomi.cloud`, both crons and the vars. `workers_dev` is off on purpose:
+This sets the custom domain `reports.atomi.cloud`, the three crons (every 15 min lost-run sweep, every 30 min repo-visibility re-check, daily 03:17 cleanup) and the vars. `workers_dev` is off on purpose:
 only `reports.atomi.cloud` serves the Worker. Set the secrets in section 5 **before** the first deploy that has `GITHUB_CLIENT_ID` filled in.
 
 ## 4. R2 lifecycle rules (once)
@@ -59,8 +59,8 @@ repos only to signed-in users that GitHub says can see the repo.
   A user only sees a private repo in the viewer when the App can see it **and** they can.
 - Generate a client secret.
 
-**b. Set the client id** in `wrangler.jsonc` (`vars.GITHUB_CLIENT_ID`, currently `"TBD"`). It is not secret. Login stays off (`/login` answers 503)
-while it is `TBD` or empty.
+**b. The client id** is already set in `wrangler.jsonc` (`vars.GITHUB_CLIENT_ID = "Iv23liYO0YI12YeI2S5S"`). It is not secret. Login stays off
+(`/login` answers 503) while it is `TBD` or empty. The same id + the client secret are also used (HTTP Basic) by the visibility cron and to revoke tokens on sign-out.
 
 **c. Set the two secrets** (never commit them):
 
@@ -72,7 +72,8 @@ openssl rand -base64 32 | wrangler secret put SESSION_KEY   # 32 random bytes, b
 `SESSION_KEY` encrypts the stored GitHub tokens and signs the login state. Changing it signs everybody out (existing sessions cannot
 be decrypted, they are treated as signed out and cleaned up by the cron). Keep a copy only in your secret store.
 
-**d. Apply migration `0004_sessions.sql`** (step 2, `--remote`) before deploying.
+**d. Apply migrations `0004_sessions.sql` and `0005_repo_visibility_checked.sql`** (step 2, `--remote`) before deploying.
+Without `0005` the viewer cannot read `repos.vis_checked_at` and every viewer page errors.
 
 **e. Remove the old Cloudflare Access apps** for `reports.atomi.cloud` (and their bypass policies), if any exist. The Worker ignores
 `Cf-Access-Jwt-Assertion` now, so leaving them in place only blocks people.

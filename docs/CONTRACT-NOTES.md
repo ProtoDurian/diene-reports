@@ -68,7 +68,7 @@
 24. **Flag chooser, no cross-flag merge.** `/commit/<sha>/coverage` without `?flag=` and with several flags shows a chooser
     instead of merging flags (each flag measures a different test run).
 25. **`tests` badge name is reserved.** `/badge/<o>/<r>/tests.svg` is the pass/fail badge; a coverage flag called `tests`
-    has no badge. Other flags give coverage badges. Unknown repo/branch/flag → grey "unknown"; private repo → grey "private".
+    has no badge. Other flags give coverage badges. Unknown repo/branch/flag → grey "unknown"; private repo → grey "unknown" too (see note 51).
 26. **Raw downloads** are served by run id: `/<owner>/<repo>/run/<id>/raw/<name>`, gunzipped, `Content-Disposition: attachment`,
     `application/octet-stream`, CSP `default-src 'none'; sandbox`.
 27. **Changed lines on the file page** come from the report's `diff.files` when the stored report is ≤ 6 MB; above that, only
@@ -117,6 +117,25 @@
     error denies the request and is not cached. Rows older than a day are deleted by the cron.
 44. **Home page** lists public projects for everyone plus private ones the user may see. At most 30 private repos are looked up per page view
     (the rest are left out until their answers are cached), so GitHub is never hammered.
-45. **Not changed:** `/api/v1/*` (OIDC), `/badge/*` (private → grey "private"), `/healthz`, `/assets/*` (public, no session lookup).
+45. **Not changed:** `/api/v1/*` (OIDC), `/badge/*` (public by design; a private repo gives the same grey "unknown" as a repo that does not exist), `/healthz`, `/assets/*` (public, no session lookup).
 46. **Header and CSP.** The header shows "Sign in with GitHub" or avatar + login + "Sign out". CSP is unchanged except
     `img-src 'self' data: https://avatars.githubusercontent.com`. Avatar URLs from any other host are dropped.
+47. **Stored visibility is re-checked** (security review). `repos.vis_checked_at` (migration `0005`) is the last time GitHub confirmed a repo's
+    visibility: a CI upload's OIDC token (`repository_visibility`), the cron below, or an inline check. Cron `*/30 * * * *` (`CRON_VISIBILITY`)
+    re-checks the 200 repos confirmed longest ago (4 at a time) with `GET https://api.github.com/repositories/{repo_id}`, HTTP Basic auth
+    `GITHUB_CLIENT_ID:GITHUB_CLIENT_SECRET` (the App itself sees public repos only). 200 → store `visibility` (and a renamed `full_name`);
+    404/401 → store `private` (fail closed; bad credentials also land here and heal on the next good run); any other status or a network
+    error → leave as is and log. **Deviation from the brief:** it uses `/repositories/{id}`, not `/repos/{owner}/{repo}`, so a rename cannot make a
+    repo look gone; it is the same call as note 42.
+48. **Inline re-check.** A repo stored as public but last confirmed more than 2 h ago is re-checked (same call, result stored, so once per 2 h)
+    before any viewer route serves it (repo, commit, PR, coverage, file, test, run tests, raw) and before the home page lists it. If GitHub
+    cannot confirm (5xx, rate limit, network), the anonymous visitor gets a "try again" page (503) and nothing is stored; a signed-in user is
+    decided by their own token as for a private repo. The home page checks at most 30 repos per view; the rest stay hidden. With sign-in not
+    configured there is nothing to check with, so the mark is trusted as before. Badges are not re-checked (they show numbers only).
+49. **Rate limit ≠ no.** A GitHub 429, or 403 with `x-ratelimit-remaining: 0` / `retry-after`, on the user's repo check is not cached and shows a
+    "try again" page (503). Other 401/403/404 stay a cached "no" (note 43).
+50. **Sessions.** A 5xx or network error from GitHub while refreshing a token keeps the session (the request is signed out, the next one retries);
+    only a 4xx / `bad_refresh_token` / expired refresh token ends it. Signing in again deletes the browser's old session row. `POST /logout`
+    also calls `DELETE /applications/{client_id}/token` (Basic auth) best-effort; failure is logged, never blocks the sign-out.
+    `next=` is rejected when it still starts with `//` after normalisation (e.g. `/.//evil.example`).
+51. **Badges** answer a private repo exactly as an unknown one (grey "unknown"), so a badge URL cannot reveal that a private repo exists.
