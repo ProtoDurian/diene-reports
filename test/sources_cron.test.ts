@@ -77,9 +77,14 @@ describe("sources", () => {
     expect(h.db.row("SELECT last_ref_at FROM blobs").last_ref_at).toBe(h.clock.t);
   });
 
-  test("source uploads have their own, larger rate bucket", async () => {
-    for (let i = 0; i < 70; i++) expect((await check([gitSha("a")])).status).toBe(200);
-    expect((await startRun(h)).status).toBe(200);
+  test("source calls count against the test job named by ?flag&job; missing params count under ''/''", async () => {
+    const call = (q: string) => h.call("POST", `/api/v1/sources/check${q}`, { body: { blobs: [gitSha("a")] } });
+    expect((await call("?flag=unit&job=unit")).status).toBe(200);
+    expect((await call("")).status).toBe(200);
+    const keys = h.db.rows("SELECT flag, job, n FROM rate ORDER BY flag");
+    expect(keys).toEqual([{ flag: "", job: "", n: 1 }, { flag: "unit", job: "unit", n: 1 }]);
+    expect((await call("?flag=bad%20flag&job=x")).status).toBe(400);
+    expect((await call("?flag=unit&job=a%2Fb")).status).toBe(400);
   });
 });
 

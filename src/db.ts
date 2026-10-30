@@ -2,20 +2,17 @@ import type { Identity } from "./auth";
 import { HttpError } from "./http";
 import { LIMITS } from "./env";
 
-export type Bucket = "w" | "s";
-
-/** Count one write for (repo, gh run, attempt); throws 429 past the cap. */
-export async function guard(db: D1Database, id: Identity, bucket: Bucket, now: number): Promise<void> {
+/** Count one write for a test job (repo, gh run, attempt, flag, job); throws 429 past the cap. */
+export async function guard(db: D1Database, id: Identity, flag: string, job: string, now: number): Promise<void> {
   const row = await db
     .prepare(
-      `INSERT INTO rate (repo_id, gh_run_id, attempt, bucket, n, created_at) VALUES (?1, ?2, ?3, ?4, 1, ?5)
-       ON CONFLICT (repo_id, gh_run_id, attempt, bucket) DO UPDATE SET n = n + 1
+      `INSERT INTO rate (repo_id, gh_run_id, attempt, flag, job, n, created_at) VALUES (?1, ?2, ?3, ?4, ?5, 1, ?6)
+       ON CONFLICT (repo_id, gh_run_id, attempt, flag, job) DO UPDATE SET n = n + 1
        RETURNING n`,
     )
-    .bind(id.repoId, id.runId, id.runAttempt, bucket, now)
+    .bind(id.repoId, id.runId, id.runAttempt, flag, job, now)
     .first<{ n: number }>();
-  const limit = bucket === "w" ? LIMITS.writesPerRun : LIMITS.sourcePutsPerRun;
-  if (!row || row.n > limit) throw new HttpError(429, "rate limit exceeded for this run");
+  if (!row || row.n > LIMITS.writesPerJob) throw new HttpError(429, "rate limit exceeded for this job");
 }
 
 export function upsertRepo(db: D1Database, id: Identity, now: number): D1PreparedStatement {

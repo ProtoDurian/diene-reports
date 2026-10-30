@@ -37,7 +37,7 @@ const BRANCH_HEAD_SQL = `INSERT INTO branch_head (project_id, flag, run_id) VALU
 export async function startRun(env: Env, id: Identity, b: StartBody, now: number): Promise<{ runId: number; state: string }> {
   checkBodyIdentity(id, b);
   const branch = projectBranch(id, b.baseRef);
-  await guard(env.DB, id, "w", now);
+  await guard(env.DB, id, b.flag, b.job, now);
   const key: RunKey = { repoId: id.repoId, ghRunId: id.runId, attempt: id.runAttempt, flag: b.flag, job: b.job };
   const headSha = b.headSha ?? id.sha;
   const deadline = now + (b.timeoutMinutes + 15) * MINUTE;
@@ -106,7 +106,7 @@ export async function finishRun(
   const ctx = s.context;
   checkBodyIdentity(id, { sha: ctx.sha, runId: ctx.runId, runAttempt: ctx.runAttempt, pr: ctx.pr });
   const branch = projectBranch(id, ctx.baseRef);
-  await guard(env.DB, id, "w", now);
+  await guard(env.DB, id, ctx.flag, ctx.job, now);
   const db = env.DB;
   const key: RunKey = { repoId: id.repoId, ghRunId: id.runId, attempt: id.runAttempt, flag: ctx.flag, job: ctx.job };
   const kp = keyParams(key);
@@ -314,13 +314,14 @@ export interface OwnedRun {
   repo_id: number;
   sha: string;
   flag: string;
+  job: string;
   gh_run_id: number;
   gh_run_attempt: number;
 }
 
 export async function ownedRun(env: Env, id: Identity, runId: number): Promise<OwnedRun> {
   const run = await env.DB
-    .prepare(`SELECT id, repo_id, sha, flag, gh_run_id, gh_run_attempt FROM runs WHERE id = ?1`)
+    .prepare(`SELECT id, repo_id, sha, flag, job, gh_run_id, gh_run_attempt FROM runs WHERE id = ?1`)
     .bind(runId)
     .first<OwnedRun>();
   if (!run) throw new HttpError(404, "unknown run");

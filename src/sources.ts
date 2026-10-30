@@ -2,14 +2,26 @@ import type { Identity } from "./auth";
 import { LIMITS, type Env } from "./env";
 import { HttpError, gitBlobSha, gunzipCapped, readCapped } from "./http";
 import { guard } from "./db";
-import { SHA_RE } from "./summary";
+import { FLAG_RE, JOB_RE, SHA_RE } from "./summary";
 
-export async function checkSources(env: Env, id: Identity, body: unknown, now: number): Promise<{ missing: string[] }> {
+export interface Attribution {
+  flag: string;
+  job: string;
+}
+
+/** ?flag= and ?job= say which test job a /sources call belongs to; missing -> counted under '' / '' */
+export function attribution(flag: string | undefined, job: string | undefined): Attribution {
+  if (flag !== undefined && flag !== "" && !FLAG_RE.test(flag)) throw new HttpError(400, "invalid flag");
+  if (job !== undefined && job !== "" && !JOB_RE.test(job)) throw new HttpError(400, "invalid job");
+  return { flag: flag ?? "", job: job ?? "" };
+}
+
+export async function checkSources(env: Env, id: Identity, body: unknown, at: Attribution, now: number): Promise<{ missing: string[] }> {
   const blobs = (body as { blobs?: unknown } | null)?.blobs;
   if (!Array.isArray(blobs)) throw new HttpError(400, "blobs: expected array");
   if (blobs.length > LIMITS.sourceCheck) throw new HttpError(400, `blobs: max ${LIMITS.sourceCheck}`);
   for (const b of blobs) if (typeof b !== "string" || !SHA_RE.test(b)) throw new HttpError(400, "blobs: expected git blob sha1 strings");
-  await guard(env.DB, id, "s", now);
+  await guard(env.DB, id, at.flag, at.job, now);
   const list = [...new Set(blobs as string[])];
   if (list.length === 0) return { missing: [] };
   const json = JSON.stringify(list);
@@ -26,9 +38,9 @@ export async function checkSources(env: Env, id: Identity, body: unknown, now: n
 }
 
 /** returns true when stored, false when it already existed */
-export async function putSource(env: Env, id: Identity, req: Request, blobSha: string, now: number): Promise<boolean> {
+export async function putSource(env: Env, id: Identity, req: Request, blobSha: string, at: Attribution, now: number): Promise<boolean> {
   if (!SHA_RE.test(blobSha)) throw new HttpError(400, "invalid blob sha");
-  await guard(env.DB, id, "s", now);
+  await guard(env.DB, id, at.flag, at.job, now);
   const known = await env.DB
     .prepare(`UPDATE blobs SET last_ref_at = ?3 WHERE repo_id = ?1 AND blob_sha = ?2 RETURNING blob_sha`)
     .bind(id.repoId, blobSha, now)

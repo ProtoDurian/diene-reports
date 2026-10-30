@@ -5,7 +5,7 @@ import { LIMITS, type Env } from "./env";
 import { HttpError, putBody, readCapped, readJson } from "./http";
 import { guard } from "./db";
 import { finishRun, knownFailing, ownedRun, startRun } from "./runs";
-import { checkSources, putSource } from "./sources";
+import { attribution, checkSources, putSource } from "./sources";
 import { parseFlag, parseStart, parseSummary } from "./summary";
 
 export interface Deps {
@@ -74,7 +74,7 @@ export function buildApp(overrides: Partial<Deps> = {}) {
   api.put("/runs/:runId/report", async (c) => {
     const id = c.get("id");
     const run = await ownedRun(c.env, id, runIdParam(c.req.param("runId")));
-    await guard(c.env.DB, id, "w", deps.now());
+    await guard(c.env.DB, id, run.flag, run.job, deps.now());
     const key = `rep/${run.repo_id}/${run.sha}/${run.flag}/${run.gh_run_id}-${run.gh_run_attempt}.json.gz`;
     await putBody(c.req.raw, c.env.BUCKET, key, LIMITS.report, "application/gzip");
     await c.env.DB.prepare(`UPDATE runs SET report_key = ?1 WHERE id = ?2`).bind(key, run.id).run();
@@ -86,7 +86,7 @@ export function buildApp(overrides: Partial<Deps> = {}) {
     const n = c.req.param("n");
     if (!/^\d{1,5}$/.test(n)) throw new HttpError(400, "invalid chunk index");
     const run = await ownedRun(c.env, id, runIdParam(c.req.param("runId")));
-    await guard(c.env.DB, id, "w", deps.now());
+    await guard(c.env.DB, id, run.flag, run.job, deps.now());
     const key = `cov/${run.repo_id}/${run.sha}/${run.flag}/${run.gh_run_id}-${run.gh_run_attempt}/${Number(n)}.json.gz`;
     await putBody(c.req.raw, c.env.BUCKET, key, LIMITS.covChunk, "application/gzip");
     return c.json({ ok: true, key });
@@ -97,7 +97,7 @@ export function buildApp(overrides: Partial<Deps> = {}) {
     const name = c.req.param("name");
     if (!/^[A-Za-z0-9._-]{1,100}$/.test(name)) throw new HttpError(400, "invalid raw name");
     const run = await ownedRun(c.env, id, runIdParam(c.req.param("runId")));
-    await guard(c.env.DB, id, "w", deps.now());
+    await guard(c.env.DB, id, run.flag, run.job, deps.now());
     const key = `raw/${run.repo_id}/${run.sha}/${run.gh_run_id}-${run.gh_run_attempt}/${run.flag}/${name}.gz`;
     await putBody(c.req.raw, c.env.BUCKET, key, LIMITS.raw, "application/gzip");
     return c.json({ ok: true, key });
@@ -105,11 +105,11 @@ export function buildApp(overrides: Partial<Deps> = {}) {
 
   api.post("/sources/check", async (c) => {
     const body = await readJson(c.req.raw, 2 * 1024 * 1024);
-    return c.json(await checkSources(c.env, c.get("id"), body, deps.now()));
+    return c.json(await checkSources(c.env, c.get("id"), body, attribution(c.req.query("flag"), c.req.query("job")), deps.now()));
   });
 
   api.put("/sources/:blobSha", async (c) => {
-    const stored = await putSource(c.env, c.get("id"), c.req.raw, c.req.param("blobSha"), deps.now());
+    const stored = await putSource(c.env, c.get("id"), c.req.raw, c.req.param("blobSha"), attribution(c.req.query("flag"), c.req.query("job")), deps.now());
     return stored ? c.json({ ok: true }) : c.body(null, 204);
   });
 

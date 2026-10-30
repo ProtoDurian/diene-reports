@@ -290,16 +290,28 @@ describe("blob uploads bound to a run", () => {
 });
 
 describe("rate limit", () => {
-  test("61st write for one (repo, run, attempt) -> 429; other runs are unaffected", async () => {
-    const s = await startRun(h); // write #1
-    for (let i = 0; i < 59; i++) {
-      expect((await putGz(h, `/api/v1/runs/${s.json.runId}/cov/${i}`, "x")).status).toBe(200);
-    }
-    const over = await putGz(h, `/api/v1/runs/${s.json.runId}/cov/60`, "x");
+  const seedRate = (flag: string, job: string, n: number) =>
+    h.db.sqlite.prepare("INSERT OR REPLACE INTO rate (repo_id, gh_run_id, attempt, flag, job, n, created_at) VALUES (1001, 5000, 1, ?1, ?2, ?3, ?4)").run(flag, job, n, h.clock.t);
+
+  test("2001st write for one test job (repo, run, attempt, flag, job) -> 429; other jobs and runs are unaffected", async () => {
+    const s = await startRun(h); // write #1 for unit/unit
+    seedRate("unit", "unit", 1999); // 1999 so far
+    expect((await putGz(h, `/api/v1/runs/${s.json.runId}/cov/0`, "x")).status).toBe(200); // 2000th
+    const over = await putGz(h, `/api/v1/runs/${s.json.runId}/cov/1`, "x");
     expect(over.status).toBe(429);
+    expect((await finishRun(h, {}, summary())).status).toBe(429);
+    // another job of the same workflow run has its own budget
+    expect((await startRun(h, {}, { flag: "e2e", job: "e2e" })).status).toBe(200);
     expect((await startRun(h, { run_attempt: "2" })).status).toBe(200);
     expect((await startRun(h, { run_id: "7000" })).status).toBe(200);
-    expect((await finishRun(h, {}, summary())).status).toBe(429);
+  });
+
+  test("a multi-job run is not starved: 60+ writes across jobs are fine", async () => {
+    for (let j = 0; j < 5; j++) {
+      const flag = `f${j}`;
+      const s = await startRun(h, {}, { flag, job: flag });
+      for (let i = 0; i < 30; i++) expect((await putGz(h, `/api/v1/runs/${s.json.runId}/cov/${i}`, "x")).status).toBe(200);
+    }
   });
 
   test("known-failing (a read) is not counted", async () => {

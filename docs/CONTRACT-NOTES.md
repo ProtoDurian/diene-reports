@@ -2,10 +2,11 @@
 
 `CONTRACT.md` is unchanged. Where it was open, the Worker does this:
 
-1. **Rate limit buckets.** The "60 writes per (repo, run, attempt)" limit is a D1 counter (table `rate`, no CF binding).
-   Run writes (`start`, `finish`, `report`, `cov`, `raw`) share one bucket of 60.
-   `sources/check` and `sources/PUT` use a separate bucket of 5000, because one run may upload thousands of files.
-   Reads (`known-failing`) are not counted. Counters older than 2 days are deleted by the GC cron.
+1. **Rate limit.** The 2000-writes limit (contract change of 2026-10-30) is a D1 counter (table `rate`, migration `0002`, no CF binding)
+   keyed by (`repository_id`, `run_id`, `run_attempt`, `flag`, `job`): one budget per test job. `start`, `finish`, `report`,
+   `cov`, `raw` and `/sources` all count against it. Run writes take flag/job from the body or the run row; `/sources/check` and
+   `PUT /sources/:blob` take `?flag=&job=` (missing → counted under `''`/`''`; invalid values → 400). `known-failing` is a read and is
+   not counted. Counters older than 2 days are deleted by the GC cron.
 2. **`missingReport`** in the `finish` response is `true` when no `report` PUT reached the run and `overCap` is false.
    (With `overCap` the action deliberately skips the report.)
 3. **`keep/` for branch lanes.** There is no `keep/` object in R2. `keep_blobs` rows (D1) hold the source blobs of the newest

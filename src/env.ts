@@ -21,8 +21,7 @@ export const LIMITS = {
   failures: 200,
   recovered: 5000,
   covFiles: 20_000,
-  writesPerRun: 60,
-  sourcePutsPerRun: 5000,
+  writesPerJob: 2000,
   message: 4 * 1024,
   stack: 16 * 1024,
 } as const;
