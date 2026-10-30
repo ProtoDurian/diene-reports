@@ -10,7 +10,8 @@ const RUN_ID = `(SELECT id FROM runs WHERE repo_id = ?1 AND gh_run_id = ?2 AND g
 
 const keyParams = (k: RunKey) => [k.repoId, k.ghRunId, k.attempt, k.flag, k.job];
 
-const HEAD_SQL = `EXISTS (SELECT 1 FROM branch_head h WHERE h.project_id = ?6 AND h.flag = ?4 AND h.run_id = ${RUN_ID})`;
+const COV_HEAD_SQL = `EXISTS (SELECT 1 FROM branch_head h WHERE h.project_id = ?6 AND h.flag = ?4 AND h.cov_run_id = ${RUN_ID})`;
+const ORDER = (run: string) => `(SELECT gh_run_id * 1000 + gh_run_attempt FROM runs WHERE id = ${run})`;
 
 export function projectBranch(id: Identity, baseRef: string | null): string {
   if (id.lane === "pr") {
@@ -29,8 +30,25 @@ export function checkBodyIdentity(id: Identity, b: { sha?: string | null; runId?
 
 const BRANCH_HEAD_SQL = `INSERT INTO branch_head (project_id, flag, run_id) VALUES (?6, ?4, ${RUN_ID})
   ON CONFLICT (project_id, flag) DO UPDATE SET run_id = excluded.run_id
-  WHERE (SELECT gh_run_id * 1000 + gh_run_attempt FROM runs WHERE id = branch_head.run_id)
-     <= (SELECT gh_run_id * 1000 + gh_run_attempt FROM runs WHERE id = excluded.run_id)`;
+  WHERE ${ORDER("branch_head.run_id")} <= ${ORDER("excluded.run_id")}`;
+
+const COV_HEAD_UPDATE_SQL = `UPDATE branch_head SET cov_run_id = ${RUN_ID}
+  WHERE project_id = ?6 AND flag = ?4 AND (cov_run_id IS NULL OR ${ORDER("cov_run_id")} <= ${ORDER(RUN_ID)})`;
+
+// Finish bodies are capped at 2 MiB, D1 binds at most ~2,000,000 bytes per value.
+const FAILURES_JSON_MAX = 1_900_000;
+
+function fitFailures<T extends { message: string | null; stack: string | null }>(failures: T[]): { json: string; trimmed: boolean } {
+  const enc = new TextEncoder();
+  let json = JSON.stringify(failures);
+  if (enc.encode(json).length <= FAILURES_JSON_MAX) return { json, trimmed: false };
+  for (const [stack, message] of [[4096, 4096], [1024, 1024], [0, 512], [0, 0]] as const) {
+    const cut = (v: string | null, n: number) => (v === null ? null : n === 0 ? null : v.slice(0, n));
+    json = JSON.stringify(failures.map((x) => ({ ...x, stack: cut(x.stack, stack), message: cut(x.message, message) })));
+    if (enc.encode(json).length <= FAILURES_JSON_MAX) return { json, trimmed: true };
+  }
+  throw new HttpError(413, "failure details too large");
+}
 
 // ---------------------------------------------------------------- start
 
@@ -39,7 +57,7 @@ export async function startRun(env: Env, id: Identity, b: StartBody, now: number
   const branch = projectBranch(id, b.baseRef);
   await guard(env.DB, id, b.flag, b.job, now);
   const key: RunKey = { repoId: id.repoId, ghRunId: id.runId, attempt: id.runAttempt, flag: b.flag, job: b.job };
-  const headSha = b.headSha ?? id.sha;
+  const headSha = id.lane === "pr" ? (b.headSha ?? id.sha) : id.sha;
   const deadline = now + (b.timeoutMinutes + 15) * MINUTE;
   const db = env.DB;
   const pid = `(SELECT project_id FROM projects WHERE repo_id = ?1 AND branch = ?2)`;
@@ -59,13 +77,6 @@ export async function startRun(env: Env, id: Identity, b: StartBody, now: number
         id.runId, id.runAttempt, now, deadline, b.timeoutMinutes,
       ),
   ];
-  if (id.lane === "branch") {
-    stmts.push(
-      db
-        .prepare(BRANCH_HEAD_SQL.replace("?6", "(SELECT project_id FROM projects WHERE repo_id = ?1 AND branch = ?6)"))
-        .bind(...keyParams(key), branch),
-    );
-  }
   stmts.push(db.prepare(`SELECT id, state FROM runs WHERE repo_id = ?1 AND gh_run_id = ?2 AND gh_run_attempt = ?3 AND flag = ?4 AND job = ?5`).bind(...keyParams(key)));
   const res = await db.batch(stmts);
   const row = res[res.length - 1]!.results[0] as { id: number; state: string } | undefined;
@@ -110,7 +121,7 @@ export async function finishRun(
   const db = env.DB;
   const key: RunKey = { repoId: id.repoId, ghRunId: id.runId, attempt: id.runAttempt, flag: ctx.flag, job: ctx.job };
   const kp = keyParams(key);
-  const headSha = ctx.headSha ?? id.sha;
+  const headSha = id.lane === "pr" ? (ctx.headSha ?? id.sha) : id.sha;
 
   // 1. read: ensure project, existing run, base candidates
   const compareToBase = id.lane === "branch" || id.lane === "pr";
@@ -118,6 +129,7 @@ export async function finishRun(
     ensureProject(db, id.repoId, branch, now),
     selectProject(db, id.repoId, branch),
     db.prepare(`SELECT id, state FROM runs WHERE repo_id = ?1 AND gh_run_id = ?2 AND gh_run_attempt = ?3 AND flag = ?4 AND job = ?5`).bind(...kp),
+    db.prepare(`SELECT cov_run_id FROM branch_head WHERE project_id = (SELECT project_id FROM projects WHERE repo_id = ?1 AND branch = ?2) AND flag = ?3`).bind(id.repoId, branch, ctx.flag),
     db
       .prepare(
         `SELECT id, state, t_total, cov_partial, failures_truncated, over_cap FROM runs
@@ -130,17 +142,22 @@ export async function finishRun(
   const projectId = (pre[1]!.results[0] as { project_id: number }).project_id;
   const existing = pre[2]!.results[0] as { id: number; state: string } | undefined;
   const isRetry = !!existing && existing.state !== "started" && existing.state !== "lost";
-  const baseRun = compareToBase ? (pre[3]!.results as Row[]).find(isComplete) : undefined;
+  const prevCovHead = (pre[3]!.results[0] as { cov_run_id: number | null } | undefined)?.cov_run_id ?? null;
+  const baseRun = compareToBase ? (pre[4]!.results as Row[]).find(isComplete) : undefined;
   const baseRunId = baseRun ? (baseRun.id as number) : null;
 
   // 2. R2: keep the summary (file tree, patch files, sources) for the viewer
   const summaryKey = `sum/${id.repoId}/${id.sha}/${ctx.flag}/${id.runId}-${id.runAttempt}.json.gz`;
-  await env.BUCKET.put(summaryKey, await gzipText(rawText), { httpMetadata: { contentType: "application/gzip" } });
+  const summaryGz = await gzipText(rawText);
+  await env.BUCKET.put(summaryKey, summaryGz, { httpMetadata: { contentType: "application/gzip" } });
 
   // 3. write: one atomic batch
   const t = s.tests;
   const cov = s.coverage;
   const failures = t ? dedupe(t.failures) : [];
+  const fit = fitFailures(failures);
+  if (fit.trimmed) s.warnings.push("failure messages and stacks were shortened to fit the storage limit");
+  const failuresJson = fit.json;
   const failureIds = new Set(failures.map((f) => f.id));
   const recovered = t ? t.recovered.filter((r) => !failureIds.has(r)) : [];
   const testsComplete = !!t && COMPLETE_STATES.has(s.outcome.class) && !t.failuresTruncated;
@@ -207,7 +224,7 @@ export async function finishRun(
              last_status = 'failed', last_fail_sha = excluded.last_fail_sha, last_fail_at = excluded.last_fail_at,
              updated_at = excluded.updated_at`,
         )
-        .bind(projectId, ctx.flag, now, headSha, JSON.stringify(failures), cutoff),
+        .bind(projectId, ctx.flag, now, headSha, failuresJson, cutoff),
     );
   }
   if (branchStats && recovered.length) {
@@ -237,7 +254,7 @@ export async function finishRun(
                        ELSE 1 END,
                   CASE WHEN EXISTS (
                          SELECT 1 FROM runs r2
-                         WHERE r2.repo_id = ?1 AND r2.head_sha = ?7 AND r2.flag = ?4 AND r2.id <> ${RUN_ID}
+                         WHERE r2.repo_id = ?1 AND r2.head_sha = ?7 AND r2.lane = '${id.lane}' AND r2.flag = ?4 AND r2.id <> ${RUN_ID}
                            AND r2.state IN ('passed', 'tests_failed') AND r2.t_total IS NOT NULL AND r2.failures_truncated = 0
                            AND NOT EXISTS (SELECT 1 FROM failures f2 WHERE f2.run_id = r2.id AND f2.test_id = json_extract(j.value, '$.id')))
                          OR EXISTS (
@@ -247,7 +264,7 @@ export async function finishRun(
                        THEN 1 ELSE 0 END
            FROM json_each(?10) j WHERE true`,
         )
-        .bind(...kp, baseRunId, headSha, projectId, cutoff, JSON.stringify(failures)),
+        .bind(...kp, baseRunId, headSha, projectId, cutoff, failuresJson),
     );
   }
   if (testsComplete) {
@@ -256,7 +273,7 @@ export async function finishRun(
         .prepare(
           `UPDATE failures SET is_flaky = 1
            WHERE is_flaky = 0
-             AND run_id IN (SELECT r2.id FROM runs r2 WHERE r2.repo_id = ?1 AND r2.head_sha = ?6 AND r2.flag = ?4
+             AND run_id IN (SELECT r2.id FROM runs r2 WHERE r2.repo_id = ?1 AND r2.head_sha = ?6 AND r2.lane = '${id.lane}' AND r2.flag = ?4
                               AND r2.id <> ${RUN_ID} AND r2.state = 'tests_failed')
              AND test_id NOT IN (SELECT test_id FROM failures WHERE run_id = ${RUN_ID})`,
         )
@@ -270,36 +287,94 @@ export async function finishRun(
           `UPDATE test_stats SET flaky_since = COALESCE(flaky_since, ?7)
            WHERE project_id = ?6 AND flag = ?4 AND (
              test_id IN (SELECT f.test_id FROM failures f WHERE f.is_flaky = 1
-                           AND f.run_id IN (SELECT r2.id FROM runs r2 WHERE r2.repo_id = ?1 AND r2.head_sha = ?8 AND r2.flag = ?4))
+                           AND f.run_id IN (SELECT r2.id FROM runs r2 WHERE r2.repo_id = ?1 AND r2.head_sha = ?8 AND r2.lane = 'branch' AND r2.flag = ?4))
              OR (flips_30d >= 2 AND window_start >= ?9 AND test_id IN (SELECT value FROM json_each(?10))))`,
         )
         .bind(...kp, projectId, now, headSha, cutoff, JSON.stringify([...failures.map((f) => f.id), ...recovered])),
     );
   }
-  if (id.lane === "branch") {
+  if (id.lane === "branch" && (t || cov)) {
     stmts.push(db.prepare(BRANCH_HEAD_SQL).bind(...kp, projectId));
-    stmts.push(db.prepare(`DELETE FROM keep_blobs WHERE project_id = ?6 AND flag = ?4 AND ${HEAD_SQL}`).bind(...kp, projectId));
-    if (s.sources.length) {
-      stmts.push(
-        db
-          .prepare(
-            `INSERT OR IGNORE INTO keep_blobs (repo_id, project_id, flag, blob_sha)
-             SELECT ?1, ?6, ?4, value FROM json_each(?7) WHERE ${HEAD_SQL}`,
-          )
-          .bind(...kp, projectId, JSON.stringify([...new Set(s.sources.map((x) => x.blob))])),
-      );
+    if (cov) {
+      stmts.push(db.prepare(COV_HEAD_UPDATE_SQL).bind(...kp, projectId));
+      if (s.sources.length) {
+        stmts.push(db.prepare(`DELETE FROM keep_blobs WHERE project_id = ?6 AND flag = ?4 AND ${COV_HEAD_SQL}`).bind(...kp, projectId));
+        stmts.push(
+          db
+            .prepare(
+              `INSERT OR IGNORE INTO keep_blobs (repo_id, project_id, flag, blob_sha)
+               SELECT ?1, ?6, ?4, value FROM json_each(?7) WHERE ${COV_HEAD_SQL}`,
+            )
+            .bind(...kp, projectId, JSON.stringify([...new Set(s.sources.map((x) => x.blob))])),
+        );
+      }
     }
   }
-  stmts.push(db.prepare(`SELECT id, report_key FROM runs WHERE repo_id = ?1 AND gh_run_id = ?2 AND gh_run_attempt = ?3 AND flag = ?4 AND job = ?5`).bind(...kp));
+  stmts.push(
+    db
+      .prepare(
+        `SELECT id, report_key, ${COV_HEAD_SQL} AS is_cov_head FROM runs WHERE repo_id = ?1 AND gh_run_id = ?2 AND gh_run_attempt = ?3 AND flag = ?4 AND job = ?5`,
+      )
+      .bind(...kp, projectId),
+  );
 
   const res = await db.batch(stmts);
-  const row = res[res.length - 1]!.results[0] as { id: number; report_key: string | null } | undefined;
+  const row = res[res.length - 1]!.results[0] as { id: number; report_key: string | null; is_cov_head: number } | undefined;
   if (!row) throw new HttpError(500, "run not written");
+  if (row.is_cov_head && id.lane === "branch") {
+    try {
+      await keepCopy(env, {
+        repoId: id.repoId, projectId, flag: ctx.flag, runId: id.runId, attempt: id.runAttempt, sha: id.sha,
+        summaryGz, reportKey: row.report_key, chunks: cov?.chunks ?? [], prevCovHead,
+      });
+    } catch (e) {
+      console.error("keep copy failed", e);
+    }
+  }
   return {
     runId: row.id,
     url: `${env.PUBLIC_BASE_URL.replace(/\/$/, "")}/${id.owner}/${id.name}/commit/${id.sha}`,
     missingReport: row.report_key === null && !s.overCap,
   };
+}
+
+export const keepPrefix = (repoId: number, projectId: number, flag: string) => `keep/${repoId}/${projectId}/${flag}/`;
+export const keepRunDir = (repoId: number, projectId: number, flag: string, runId: number, attempt: number) =>
+  `${keepPrefix(repoId, projectId, flag)}${runId}-${attempt}/`;
+
+interface KeepArgs {
+  repoId: number;
+  projectId: number;
+  flag: string;
+  runId: number;
+  attempt: number;
+  sha: string;
+  summaryGz: Uint8Array;
+  reportKey: string | null;
+  chunks: number[];
+  prevCovHead: number | null;
+}
+
+// Branch-head run: copy sum/rep/cov to keep/ (no lifecycle expiry) and drop the previous head's copies.
+async function keepCopy(env: Env, a: KeepArgs): Promise<void> {
+  const dir = keepRunDir(a.repoId, a.projectId, a.flag, a.runId, a.attempt);
+  const gzMeta = { httpMetadata: { contentType: "application/gzip" } };
+  await env.BUCKET.put(`${dir}sum.json.gz`, a.summaryGz, gzMeta);
+  const copy = async (from: string, to: string) => {
+    const o = await env.BUCKET.get(from);
+    if (o) await env.BUCKET.put(to, o.body, gzMeta);
+  };
+  if (a.reportKey) await copy(a.reportKey, `${dir}rep.json.gz`);
+  const covBase = `cov/${a.repoId}/${a.sha}/${a.flag}/${a.runId}-${a.attempt}`;
+  for (const n of a.chunks) await copy(`${covBase}/${n}.json.gz`, `${dir}cov/${n}.json.gz`);
+  const prefix = keepPrefix(a.repoId, a.projectId, a.flag);
+  let cursor: string | undefined;
+  do {
+    const page = await env.BUCKET.list({ prefix, cursor });
+    const old = page.objects.map((o) => o.key).filter((k) => !k.startsWith(dir));
+    if (old.length) await env.BUCKET.delete(old);
+    cursor = page.truncated ? page.cursor : undefined;
+  } while (cursor);
 }
 
 function dedupe<T extends { id: string }>(xs: T[]): T[] {

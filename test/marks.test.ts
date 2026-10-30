@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, test } from "bun:test";
 import { DAY } from "../src/env";
-import { SHA, SHA2, finishN, finishRun, makeHarness, prClaims, runClaims, summary, sumFor, type Harness } from "./harness";
+import { SHA, SHA2, finishN, finishSha, finishRun, makeHarness, prClaims, runClaims, summary, sumFor, type Harness } from "./harness";
 
 let h: Harness;
 beforeEach(async () => {
@@ -68,36 +68,36 @@ describe("NEW marks", () => {
 
 describe("FLAKY marks", () => {
   test("same head_sha failed then passed in a later run -> the earlier failure becomes FLAKY (retroactive)", async () => {
-    const a = await finishN(h, 1, { headSha: SHA2, failures: [{ id: "t" }] });
+    const a = await finishSha(h, 1, SHA2, { failures: [{ id: "t" }] });
     expect(marks(a.json.runId)).toEqual({ t: [null, 0] });
-    await finishN(h, 2, { headSha: SHA2 });
+    await finishSha(h, 2, SHA2);
     expect(marks(a.json.runId).t[1]).toBe(1);
   });
 
   test("same head_sha passed first then failed -> FLAKY at insert", async () => {
-    await finishN(h, 1, { headSha: SHA2 });
-    const b = await finishN(h, 2, { headSha: SHA2, failures: [{ id: "t" }] });
+    await finishSha(h, 1, SHA2);
+    const b = await finishSha(h, 2, SHA2, { failures: [{ id: "t" }] });
     expect(marks(b.json.runId).t[1]).toBe(1);
   });
 
   test("different head_sha does not make it flaky; a still-failing re-run does not either", async () => {
-    await finishN(h, 1, { headSha: SHA, failures: [{ id: "t" }] });
-    const x = await finishN(h, 2, { headSha: SHA2, failures: [{ id: "t" }] });
+    await finishSha(h, 1, SHA, { failures: [{ id: "t" }] });
+    const x = await finishSha(h, 2, SHA2, { failures: [{ id: "t" }] });
     expect(marks(x.json.runId).t[1]).toBe(0);
-    const y = await finishN(h, 3, { headSha: SHA2, failures: [{ id: "t" }] });
+    const y = await finishSha(h, 3, SHA2, { failures: [{ id: "t" }] });
     expect(marks(y.json.runId).t[1]).toBe(0);
     expect(marks(x.json.runId).t[1]).toBe(0);
   });
 
   test("an incomplete same-sha run (errored) does not prove the test passed", async () => {
-    const a = await finishN(h, 1, { headSha: SHA2, failures: [{ id: "t" }] });
-    await finishN(h, 2, { headSha: SHA2, cls: "errored", subReason: "crash", tests: null });
+    const a = await finishSha(h, 1, SHA2, { failures: [{ id: "t" }] });
+    await finishSha(h, 2, SHA2, { cls: "errored", subReason: "crash", tests: null });
     expect(marks(a.json.runId).t[1]).toBe(0);
   });
 
   test("another flag's pass does not count", async () => {
-    const a = await finishN(h, 1, { headSha: SHA2, failures: [{ id: "t" }] });
-    await finishN(h, 2, { headSha: SHA2, flag: "int", job: "int" });
+    const a = await finishSha(h, 1, SHA2, { failures: [{ id: "t" }] });
+    await finishSha(h, 2, SHA2, { flag: "int", job: "int" });
     expect(marks(a.json.runId).t[1]).toBe(0);
   });
 

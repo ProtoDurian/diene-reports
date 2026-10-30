@@ -9,9 +9,12 @@
    not counted. Counters older than 2 days are deleted by the GC cron.
 2. **`missingReport`** in the `finish` response is `true` when no `report` PUT reached the run and `overCap` is false.
    (With `overCap` the action deliberately skips the report.)
-3. **`keep/` for branch lanes.** There is no `keep/` object in R2. `keep_blobs` rows (D1) hold the source blobs of the newest
-   branch-lane run per (project, flag); GC spares them. Every branch lane counts, not only the default branch,
-   because the Worker does not know which branch is the default. An older run id retried later cannot replace them.
+3. **`keep/` for branch lanes.** The newest finished branch-lane run **with coverage** per (project, flag) is the "coverage head"
+   (`branch_head.cov_run_id`). On its `finish` the Worker copies `sum/`, `rep/` and the `cov/` chunks it lists into
+   `keep/<repo_id>/<project_id>/<flag>/<run_id>-<attempt>/{sum.json.gz,rep.json.gz,cov/<n>.json.gz}` and deletes the previous
+   head's copies. **`keep/` must have no lifecycle expiry.** `keep_blobs` (D1) hold the source blobs of the coverage head, replaced only
+   when the finishing coverage head has sources. GC spares them. Every branch lane counts, not only the default branch.
+   An older run id retried later cannot replace them. The viewer falls back to `keep/` when `sum/`, `cov/` or `rep/` expired.
 4. **Summary kept in R2.** `finish` stores the raw summary as `sum/<repo_id>/<sha>/<flag>/<run>-<attempt>.json.gz`
    (file tree, patch files, source list for the viewer). Lifecycle: 90 d, like `rep/`.
 5. **`failures` > 200** are cut to 200 and `failuresTruncated=true`; the Worker does not return `400`.
@@ -41,9 +44,22 @@
     count again.
 15. **`started_at`.** From the `start` record. An orphan `finish` uses `outcome.startedAt`, otherwise it stays NULL.
     `deadline_at` = `start` time + `timeoutMinutes` + 15 min. A run past its deadline is `lost`; a later `finish` replaces it.
-16. **`branch_head`** is ordered by (`gh_run_id`, `gh_run_attempt`), so a late retry of an older run never takes the head.
+16. **`branch_head`** is set on `finish` only (never on `start`), ordered by (`gh_run_id`, `gh_run_attempt`), so a late retry of an
+    older run never takes the head. `run_id` = newest finished branch run with tests or coverage; `cov_run_id` = newest with coverage
+    (badge, `keep/`). A cancelled, lost or crashed run with neither never becomes the head. Migration `0003`.
 17. **JWKS.** Cached 1 h. An unknown `kid` forces a refetch, at most once per 30 s. If GitHub is down and nothing is cached → `503`.
     Clock skew allowed: 60 s.
 18. **GC** removes up to 10 000 stale blobs per night; the rest wait for the next run. Run rows, failures and commits older
     than 180 d go, except rows that are a `branch_head`.
 19. **Public paths.** `/healthz` returns `{"ok":true}`. Everything under `/api/v1` needs a token. The viewer comes in PR 2.
+20. **`headSha`.** Taken from the body only on the `pr` lane; on branch, tag and other lanes it is forced to the token's `sha`.
+    `headSha` and `baseSha` must be 40 lowercase hex chars (`400` otherwise). The same-commit FLAKY rule only compares runs of the
+    same lane. A PR cannot mark a branch failure flaky.
+21. **Shape checks.** `coverage.files[]` (`path`, `lines`, `hit ≤ lines`, `chunk`), `patch.files[]` (`path`, `lines`, `hit`, `uncovered`: ints,
+    max 5000) and `raw[]` (`name` regex, `kind`, `bytes`) are validated; a wrong shape is `400`. Inconsistent totals are clamped
+    (`linesHit`/`branchesHit`/patch `hit` to their totals, tests `total` raised to the sum of its parts) with an entry in `warnings`.
+22. **Failure JSON size.** If the failures of one finish exceed ~1.9 MB as JSON (D1 binds at most ~2 MB per value), messages and stacks
+    are shortened step by step and a warning is stored. The raw summary in `sum/` is unchanged.
+23. **`workers.dev` deviation from CONTRACT §0.** `workers_dev` is `false`, so the Worker is **not** reachable at
+    `diene-reports.kirinnee.workers.dev` (that host sits outside Cloudflare Access). Only `reports.atomi.cloud` serves it.
+    The viewer additionally verifies the `Cf-Access-Jwt-Assertion` JWT itself (vars `ACCESS_TEAM_DOMAIN`, `ACCESS_AUD`) and answers `403` without it.

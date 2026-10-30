@@ -4,6 +4,8 @@ export interface Env {
   ALLOWED_OWNER_IDS: string;
   OIDC_AUDIENCE: string;
   PUBLIC_BASE_URL: string;
+  ACCESS_TEAM_DOMAIN: string;
+  ACCESS_AUD: string;
 }
 
 export const ISSUER = "https://token.actions.githubusercontent.com";

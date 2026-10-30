@@ -41,6 +41,8 @@ wrangler r2 bucket lifecycle add diene-reports sum-90d sum/ --expire-days 90
 wrangler r2 bucket lifecycle list diene-reports
 ```
 
+**Do not add a rule for `keep/`.** It holds the newest coverage run of each branch and flag (replaced on every finish) and never expires.
+
 ## 5. Cloudflare Access
 
 - Access app on `reports.atomi.cloud` for people (the viewer).

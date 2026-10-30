@@ -22,7 +22,7 @@ describe("start -> finish", () => {
     expect(row.lane).toBe("branch");
     expect(row.branch).toBe("main");
     expect(row.head_sha).toBe(SHA);
-    expect(h.db.row("SELECT * FROM branch_head").run_id).toBe(r.json.runId);
+    expect(h.db.rows("SELECT * FROM branch_head")).toEqual([]);
   });
 
   test("start is idempotent: same identity -> same run", async () => {

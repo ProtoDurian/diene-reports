@@ -11,25 +11,27 @@ export async function gc(env: Env, now: number): Promise<{ blobs: number; runs: 
   const db = env.DB;
   let blobs = 0;
   for (let i = 0; i < 20; i++) {
-    const stale = await db
+    // Delete the rows first (atomically re-checking staleness), then only the R2 objects of the rows that really went.
+    const gone = await db
       .prepare(
-        `SELECT b.repo_id, b.blob_sha FROM blobs b
-         WHERE b.last_ref_at < ?1
-           AND NOT EXISTS (SELECT 1 FROM keep_blobs k WHERE k.repo_id = b.repo_id AND k.blob_sha = b.blob_sha)
-         LIMIT 500`,
+        `DELETE FROM blobs WHERE (repo_id, blob_sha) IN (
+           SELECT b.repo_id, b.blob_sha FROM blobs b
+           WHERE b.last_ref_at < ?1
+             AND NOT EXISTS (SELECT 1 FROM keep_blobs k WHERE k.repo_id = b.repo_id AND k.blob_sha = b.blob_sha)
+           LIMIT 500)
+         AND last_ref_at < ?1
+         RETURNING repo_id, blob_sha`,
       )
       .bind(now - SRC_TTL_DAYS * DAY)
       .all<{ repo_id: number; blob_sha: string }>();
-    if (stale.results.length === 0) break;
-    await env.BUCKET.delete(stale.results.map((r) => `src/${r.repo_id}/${r.blob_sha}`));
-    await db.batch(
-      stale.results.map((r) => db.prepare(`DELETE FROM blobs WHERE repo_id = ?1 AND blob_sha = ?2`).bind(r.repo_id, r.blob_sha)),
-    );
-    blobs += stale.results.length;
+    if (gone.results.length === 0) break;
+    await env.BUCKET.delete(gone.results.map((r) => `src/${r.repo_id}/${r.blob_sha}`));
+    blobs += gone.results.length;
   }
 
   const cutoff = now - ROW_TTL_DAYS * DAY;
-  const old = `SELECT id FROM runs WHERE created_at < ?1 AND id NOT IN (SELECT run_id FROM branch_head)`;
+  const old = `SELECT id FROM runs WHERE created_at < ?1 AND id NOT IN (SELECT run_id FROM branch_head)
+    AND id NOT IN (SELECT cov_run_id FROM branch_head WHERE cov_run_id IS NOT NULL)`;
   const counted = await db.prepare(`SELECT COUNT(*) AS n FROM (${old})`).bind(cutoff).first<{ n: number }>();
   await db.batch([
     db.prepare(`DELETE FROM failures WHERE run_id IN (${old})`).bind(cutoff),

@@ -118,6 +118,8 @@ export async function makeHarness(jwksOpts: { minRefetchMs?: number } = { minRef
     ALLOWED_OWNER_IDS: "349664883,55664364",
     OIDC_AUDIENCE: "diene-reports",
     PUBLIC_BASE_URL: "https://reports.atomi.cloud",
+    ACCESS_TEAM_DOMAIN: "https://atomicloud.cloudflareaccess.com",
+    ACCESS_AUD: "ab2d52e241e575a8c4df3db1476312906c0e85dc63f675880faa9b15a44423df",
   } satisfies Env;
   const app = buildApp({ jwks, now: () => clock.t });
   const h: Harness = {
@@ -296,3 +298,7 @@ export const finishN = (h: Harness, n: number, o: Parameters<typeof summary>[0] 
 
 export const putGz = (h: Harness, path: string, data: string | Uint8Array, claims: Record<string, unknown> = {}, headers: Record<string, string> = {}) =>
   h.call("PUT", path, { claims, rawBody: gz(data), headers: { "content-type": "application/gzip", ...headers } });
+
+/** finish for run n whose token sha is `sha` (a re-run of one commit) */
+export const finishSha = (h: Harness, n: number, sha: string, o: Parameters<typeof summary>[0] = {}, claims: Record<string, unknown> = {}) =>
+  finishRun(h, runClaims(n, { sha, ...claims }), summary({ ...o, claims: { sha, runId: 5000 + n, runAttempt: 1 } }));
