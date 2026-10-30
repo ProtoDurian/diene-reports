@@ -18,7 +18,9 @@ export const visStale = (r: Pick<RepoVis, "vis_checked_at">, now: number) => now
 
 /**
  * Ask GitHub (as the App, client id + secret, so it sees public repos only) what the repo is now.
- * 200: store its visibility (and a new owner/name after a rename). 404/401: store 'private' (fail closed).
+ * 200: store its visibility (and a new owner/name after a rename). 404: store 'private' (fail closed).
+ * 401 means GitHub rejected OUR client id/secret, not that the repo is private: log it loudly and store nothing
+ * (stale public repos then fail closed in the viewer until the credentials are fixed).
  * Anything else (rate limit, 5xx, network): null, nothing stored.
  */
 export async function checkRepoVisibility(env: Env, deps: AuthDeps, repo: RepoVis): Promise<"public" | "private" | "internal" | null> {
@@ -34,8 +36,11 @@ export async function checkRepoVisibility(env: Env, deps: AuthDeps, repo: RepoVi
       visibility = b.visibility === "public" || b.visibility === "private" || b.visibility === "internal" ? b.visibility : b.private === false ? "public" : "private";
       const m = typeof b.full_name === "string" ? /^([^/]+)\/([^/]+)$/.exec(b.full_name) : null;
       if (m) [, owner, name] = m as unknown as [string, string, string];
-    } else if (res.status === 404 || res.status === 401) {
+    } else if (res.status === 404) {
       visibility = "private";
+    } else if (res.status === 401) {
+      console.error("visibility check: GitHub rejected the app client id/secret (401) — check GITHUB_CLIENT_SECRET", repo.repo_id);
+      return null;
     } else {
       console.warn("visibility check: unexpected status", repo.repo_id, res.status);
       return null;

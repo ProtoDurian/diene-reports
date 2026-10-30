@@ -124,7 +124,7 @@
     visibility: a CI upload's OIDC token (`repository_visibility`), the cron below, or an inline check. Cron `*/30 * * * *` (`CRON_VISIBILITY`)
     re-checks the 200 repos confirmed longest ago (4 at a time) with `GET https://api.github.com/repositories/{repo_id}`, HTTP Basic auth
     `GITHUB_CLIENT_ID:GITHUB_CLIENT_SECRET` (the App itself sees public repos only). 200 → store `visibility` (and a renamed `full_name`);
-    404/401 → store `private` (fail closed; bad credentials also land here and heal on the next good run); any other status or a network
+    404 → store `private` (fail closed). 401 = GitHub rejected our own client id/secret: logged, nothing stored (changed 2026-10-30: a bad secret had flipped every repo to private); any other status or a network
     error → leave as is and log. **Deviation from the brief:** it uses `/repositories/{id}`, not `/repos/{owner}/{repo}`, so a rename cannot make a
     repo look gone; it is the same call as note 42.
 48. **Inline re-check.** A repo stored as public but last confirmed more than 2 h ago is re-checked (same call, result stored, so once per 2 h)
