@@ -122,16 +122,15 @@
     `img-src 'self' data: https://avatars.githubusercontent.com`. Avatar URLs from any other host are dropped.
 47. **Stored visibility is re-checked** (security review). `repos.vis_checked_at` (migration `0005`) is the last time GitHub confirmed a repo's
     visibility: a CI upload's OIDC token (`repository_visibility`), the cron below, or an inline check. Cron `*/30 * * * *` (`CRON_VISIBILITY`)
-    re-checks the 200 repos confirmed longest ago (4 at a time) with `GET https://api.github.com/repositories/{repo_id}`, HTTP Basic auth
-    `GITHUB_CLIENT_ID:GITHUB_CLIENT_SECRET` (the App itself sees public repos only). 200 → store `visibility` (and a renamed `full_name`);
-    404 → store `private` (fail closed). 401 = GitHub rejected our own client id/secret: logged, nothing stored (changed 2026-10-30: a bad secret had flipped every repo to private); any other status or a network
-    error → leave as is and log. **Deviation from the brief:** it uses `/repositories/{id}`, not `/repos/{owner}/{repo}`, so a rename cannot make a
+    re-checks the 200 repos confirmed longest ago (4 at a time) with `GET https://api.github.com/repositories/{repo_id}`, authenticated as the
+    App **installation** of the repo's owner (note 52); GitHub rejects the client id/secret there (401), so Basic auth is no longer used for
+    visibility. 200 → store `visibility` (and a renamed `full_name`); 404 → store `private` (fail closed). 401/403/429, any other status or a
+    network error → leave as is and log (a 401 also drops the cached token). **Deviation from the brief:** it uses `/repositories/{id}`, not `/repos/{owner}/{repo}`, so a rename cannot make a
     repo look gone; it is the same call as note 42.
-48. **Inline re-check.** A repo stored as public but last confirmed more than 2 h ago is re-checked (same call, result stored, so once per 2 h)
+48. **Inline re-check.** A repo stored as public but last confirmed more than 6 h ago is re-checked (same call, result stored, so once per 6 h)
     before any viewer route serves it (repo, commit, PR, coverage, file, test, run tests, raw) and before the home page lists it. If GitHub
     cannot confirm (5xx, rate limit, network), the anonymous visitor gets a "try again" page (503) and nothing is stored; a signed-in user is
-    decided by their own token as for a private repo. The home page checks at most 30 repos per view; the rest stay hidden. With sign-in not
-    configured there is nothing to check with, so the mark is trusted as before. Badges are not re-checked (they show numbers only).
+    decided by their own token as for a private repo. The home page checks at most 30 repos per view; the rest stay hidden. The check no longer depends on sign-in being configured. Badges are not re-checked (they show numbers only).
 49. **Rate limit ≠ no.** A GitHub 429, or 403 with `x-ratelimit-remaining: 0` / `retry-after`, on the user's repo check is not cached and shows a
     "try again" page (503). Other 401/403/404 stay a cached "no" (note 43).
 50. **Sessions.** A 5xx or network error from GitHub while refreshing a token keeps the session (the request is signed out, the next one retries);
@@ -139,3 +138,12 @@
     also calls `DELETE /applications/{client_id}/token` (Basic auth) best-effort; failure is logged, never blocks the sign-out.
     `next=` is rejected when it still starts with `//` after normalisation (e.g. `/.//evil.example`).
 51. **Badges** answer a private repo exactly as an unknown one (grey "unknown"), so a badge URL cannot reveal that a private repo exists.
+52. **Installation-token auth for visibility** (changed 2026-10-30). `GITHUB_APP_ID` (var, 5545592) + `GITHUB_APP_PRIVATE_KEY_B64` (secret, base64 of
+    the PEM; PKCS#1 is wrapped to PKCS#8 for WebCrypto, PKCS#8 accepted as is). App JWT: RS256, `iat` = now-60 s, `exp` = now+9 min, `iss` = app id.
+    Per owner: `GET /orgs/{owner}/installation`, falling back to `/users/{owner}/installation` on 404; the id is cached in D1
+    (`app_installations`, migration `0006`, owner case-insensitive; "not installed" cached as NULL and retried after 1 h; a 404 when minting
+    a token forgets the id). `POST /app/installations/{id}/access_tokens` → token cached in memory per isolate until 5 min before it expires
+    (concurrent callers share one mint). The check then sends `Authorization: Bearer <token>`. With the key or app id unset, or an owner without
+    the installation, the same call is made **unauthenticated** (200 → visibility, 404 → private, 403/429 → unknown, 60/h per shared egress IP).
+    A failed lookup, mint or key import (5xx, bad key, rejected JWT) is "unknown" (nothing stored) and does **not** fall back to unauthenticated
+    calls. Basic auth is only left for `DELETE /applications/{client_id}/token` on sign-out. The App needs Repository permission Metadata: read.

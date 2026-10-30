@@ -60,7 +60,7 @@ repos only to signed-in users that GitHub says can see the repo.
 - Generate a client secret.
 
 **b. The client id** is already set in `wrangler.jsonc` (`vars.GITHUB_CLIENT_ID = "Iv23liYO0YI12YeI2S5S"`). It is not secret. Login stays off
-(`/login` answers 503) while it is `TBD` or empty. The same id + the client secret are also used (HTTP Basic) by the visibility cron and to revoke tokens on sign-out.
+(`/login` answers 503) while it is `TBD` or empty. The client id + secret are also used (HTTP Basic) to revoke tokens on sign-out. Visibility checks use the App installation instead (step e).
 
 **c. Set the two secrets** (never commit them):
 
@@ -72,10 +72,30 @@ openssl rand -base64 32 | wrangler secret put SESSION_KEY   # 32 random bytes, b
 `SESSION_KEY` encrypts the stored GitHub tokens and signs the login state. Changing it signs everybody out (existing sessions cannot
 be decrypted, they are treated as signed out and cleaned up by the cron). Keep a copy only in your secret store.
 
-**d. Apply migrations `0004_sessions.sql` and `0005_repo_visibility_checked.sql`** (step 2, `--remote`) before deploying.
-Without `0005` the viewer cannot read `repos.vis_checked_at` and every viewer page errors.
+**d. Apply migrations `0004_sessions.sql`, `0005_repo_visibility_checked.sql` and `0006_app_installations.sql`** (step 2, `--remote`) before deploying.
+Without `0005` the viewer cannot read `repos.vis_checked_at` and every viewer page errors; `0006` caches the installation id per owner.
 
-**e. Remove the old Cloudflare Access apps** for `reports.atomi.cloud` (and their bypass policies), if any exist. The Worker ignores
+**e. Visibility checks as the App installation** (needs the App's private key). GitHub rejects the client id/secret on
+`GET /repositories/{id}` and rate-limits unauthenticated calls to 60/hour per shared Cloudflare IP, so the cron and the inline re-check
+authenticate as the App **installation**:
+
+1. On the App's settings page, **Generate a private key** (downloads a `.pem`, PKCS#1 `BEGIN RSA PRIVATE KEY`; PKCS#8 also works).
+2. Store it as a secret, base64 of the whole file (one line), never committed:
+
+   ```sh
+   base64 -w0 < your-app.private-key.pem | wrangler secret put GITHUB_APP_PRIVATE_KEY_B64
+   ```
+
+3. `vars.GITHUB_APP_ID = "5545592"` is already in `wrangler.jsonc` (the numeric **App ID**, not the client id).
+4. **Install the App on every owner (org or user) whose repos are uploaded**, with Repository permission **Metadata: read**.
+   The Worker finds the installation per owner (`GET /orgs/{owner}/installation`, then `/users/{owner}/installation`) and caches
+   the id in D1 (a "not installed" answer is retried after 1 h; install the App and it is picked up within the hour).
+
+Without the key or the app id, or for an owner without the installation, checks fall back to **unauthenticated**
+`GET /repositories/{id}`: public repos are confirmed, private ones answer 404 (so stay private), but the 60/hour/IP limit applies and
+rate-limited checks are skipped (the viewer shows "try again" for an unconfirmable public repo). Public repos are re-confirmed every 6 h.
+
+**f. Remove the old Cloudflare Access apps** for `reports.atomi.cloud` (and their bypass policies), if any exist. The Worker ignores
 `Cf-Access-Jwt-Assertion` now, so leaving them in place only blocks people.
 
 ## 6. Check

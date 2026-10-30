@@ -1,9 +1,10 @@
 import { HOUR, type Env } from "./env";
-import { ghBasicHeaders, authConfigured, type AuthDeps } from "./session";
+import { dropToken, installationAuth } from "./githubapp";
+import type { AuthDeps } from "./session";
 
 /** a public-marked repo whose visibility was confirmed longer ago than this is re-checked before it is served */
-export const VIS_FRESH_MS = 2 * HOUR;
-/** repos re-checked per cron run (oldest first); each costs two subrequests */
+export const VIS_FRESH_MS = 6 * HOUR;
+/** repos re-checked per cron run (oldest first); each costs one subrequest (plus a few per owner for the installation and its token) */
 export const VIS_BATCH = 200;
 
 export interface RepoVis {
@@ -17,20 +18,27 @@ export interface RepoVis {
 export const visStale = (r: Pick<RepoVis, "vis_checked_at">, now: number) => now - r.vis_checked_at > VIS_FRESH_MS;
 
 /**
- * Ask GitHub (as the App, client id + secret, so it sees public repos only) what the repo is now.
+ * Ask GitHub what the repo is now: as the App's installation on the owner (an installation token, see githubapp.ts), or
+ * unauthenticated when the App is not configured / not installed on that owner (public repos only; 60 requests/hour per IP).
  * 200: store its visibility (and a new owner/name after a rename). 404: store 'private' (fail closed).
- * 401 means GitHub rejected OUR client id/secret, not that the repo is private: log it loudly and store nothing
- * (stale public repos then fail closed in the viewer until the credentials are fixed).
- * Anything else (rate limit, 5xx, network): null, nothing stored.
+ * Anything else (401, 403, 429, 5xx, network): null, nothing stored; the viewer then fails closed for stale public repos.
  */
 export async function checkRepoVisibility(env: Env, deps: AuthDeps, repo: RepoVis): Promise<"public" | "private" | "internal" | null> {
-  if (!authConfigured(env)) return null;
+  const auth = await installationAuth(env, deps, repo.owner);
+  if (!auth) return null;
   const now = deps.now();
   let visibility: "public" | "private" | "internal";
   let owner = repo.owner;
   let name = repo.name;
   try {
-    const res = await deps.fetch(`https://api.github.com/repositories/${repo.repo_id}`, { headers: ghBasicHeaders(env) });
+    const res = await deps.fetch(`https://api.github.com/repositories/${repo.repo_id}`, {
+      headers: {
+        accept: "application/vnd.github+json",
+        "user-agent": "diene-reports",
+        "x-github-api-version": "2022-11-28",
+        ...(auth.token ? { authorization: `Bearer ${auth.token}` } : {}),
+      },
+    });
     if (res.status === 200) {
       const b = (await res.json()) as { visibility?: unknown; private?: unknown; full_name?: unknown };
       visibility = b.visibility === "public" || b.visibility === "private" || b.visibility === "internal" ? b.visibility : b.private === false ? "public" : "private";
@@ -38,11 +46,9 @@ export async function checkRepoVisibility(env: Env, deps: AuthDeps, repo: RepoVi
       if (m) [, owner, name] = m as unknown as [string, string, string];
     } else if (res.status === 404) {
       visibility = "private";
-    } else if (res.status === 401) {
-      console.error("visibility check: GitHub rejected the app client id/secret (401) — check GITHUB_CLIENT_SECRET", repo.repo_id);
-      return null;
     } else {
-      console.warn("visibility check: unexpected status", repo.repo_id, res.status);
+      if (res.status === 401 && auth.installationId !== null) dropToken(auth.installationId); // revoked early: mint a new one next time
+      console.warn("visibility check: unexpected status", repo.repo_id, res.status, auth.token ? "(installation token)" : "(unauthenticated)");
       return null;
     }
   } catch (e) {
@@ -62,7 +68,6 @@ export async function checkRepoVisibility(env: Env, deps: AuthDeps, repo: RepoVi
 
 /** cron: re-check the repos whose visibility was confirmed longest ago */
 export async function sweepVisibility(env: Env, deps: AuthDeps): Promise<{ checked: number; changed: number; skipped: number }> {
-  if (!authConfigured(env)) return { checked: 0, changed: 0, skipped: 0 };
   const rows = await env.DB
     .prepare(`SELECT repo_id, owner, name, visibility, vis_checked_at FROM repos ORDER BY vis_checked_at ASC LIMIT ?1`)
     .bind(VIS_BATCH)

@@ -493,8 +493,8 @@ The viewer is public-facing with its own login, like Codecov:
   signed-in user for whom GitHub (asked with that user's own token, cached 10 minutes) returns the repo.
   Everyone else gets the same 404 page as for an unknown repo, so a private repo's existence is never confirmed.
 - **The stored visibility can go stale** (a repo made private after its last CI run). Two guards: a cron every 30 min re-asks GitHub
-  (as the App, Basic auth) about the repos confirmed longest ago and fails closed (404/401 → private); and a public repo not confirmed for
-  2 h is re-checked inline before it is served. See CONTRACT-NOTES 47-49.
+  (as the App installation of the repo's owner, unauthenticated when the App is not installed) about the repos confirmed longest ago and
+  fails closed (404 → private; errors change nothing); and a public repo not confirmed for 6 h is re-checked inline before it is served. See CONTRACT-NOTES 47-49.
 - `/api/v1/*` stays on GitHub OIDC; `/badge/*` shows numbers only (private repos look like unknown ones: grey "unknown").
 
 ## 6. Migration from Codecov

@@ -19,7 +19,8 @@
     "ALLOWED_OWNER_IDS": "349664883,55664364",
     "OIDC_AUDIENCE": "diene-reports",
     "PUBLIC_BASE_URL": "https://reports.atomi.cloud",
-    "GITHUB_CLIENT_ID": "Iv23liYO0YI12YeI2S5S"
+    "GITHUB_CLIENT_ID": "Iv23liYO0YI12YeI2S5S",
+    "GITHUB_APP_ID": "5545592"
   },
   "triggers": { "crons": ["*/15 * * * *", "*/30 * * * *", "17 3 * * *"] },
   "observability": { "enabled": true }
