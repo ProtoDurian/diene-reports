@@ -146,8 +146,6 @@ describe("JWKS cache", () => {
   });
 
   test("JWKS outage with no cached keys -> 503; with cached keys keeps working", async () => {
-    const t = await makeHarness();
-    (t as any).app = undefined;
     const broken = await makeHarness();
     const { JwksCache } = await import("../src/auth");
     const { buildApp } = await import("../src/app");

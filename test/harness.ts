@@ -222,7 +222,7 @@ export function summary(o: {
     o.tests !== undefined
       ? o.tests
       : {
-          totals: { total: 10, passed: 10 - failures.length, failed: failures.filter((f) => f.status === "failed").length, errored: failures.filter((f) => f.status === "errored").length, skipped: 0, durationMs: 250 },
+          totals: { total: Math.max(10, failures.length), passed: Math.max(10, failures.length) - failures.length, failed: failures.filter((f) => f.status === "failed").length, errored: failures.filter((f) => f.status === "errored").length, skipped: 0, durationMs: 250 },
           failures,
           failuresTruncated: o.truncated ?? false,
           recovered: o.recovered ?? [],
@@ -276,3 +276,23 @@ export function summary(o: {
 export const runClaims = (n: number, over: Record<string, unknown> = {}) => ({ run_id: String(5000 + n), sha: n.toString(16).padStart(40, "0"), ...over });
 export const sumFor = (n: number, o: Parameters<typeof summary>[0] = {}) =>
   summary({ ...o, claims: { sha: n.toString(16).padStart(40, "0"), runId: 5000 + n, runAttempt: 1 } });
+
+export const prClaims = (n: number, pr: number, over: Record<string, unknown> = {}) => ({
+  ref: `refs/pull/${pr}/merge`,
+  event_name: "pull_request",
+  ...runClaims(n),
+  ...over,
+});
+
+export const startRun = (h: Harness, claims: Record<string, unknown> = {}, body: Record<string, unknown> = {}) =>
+  h.call("POST", "/api/v1/runs/start", { claims, body: startBody(body) });
+
+export const finishRun = (h: Harness, claims: Record<string, unknown> = {}, body: unknown = summary()) =>
+  h.call("POST", "/api/v1/runs/finish", { claims, body });
+
+/** finish for the n-th run of the repo on branch main */
+export const finishN = (h: Harness, n: number, o: Parameters<typeof summary>[0] = {}, claims: Record<string, unknown> = {}) =>
+  finishRun(h, runClaims(n, claims), sumFor(n, o));
+
+export const putGz = (h: Harness, path: string, data: string | Uint8Array, claims: Record<string, unknown> = {}, headers: Record<string, string> = {}) =>
+  h.call("PUT", path, { claims, rawBody: gz(data), headers: { "content-type": "application/gzip", ...headers } });
