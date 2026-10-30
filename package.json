@@ -7,7 +7,8 @@
     "test": "bun test",
     "dev": "wrangler dev",
     "seed": "bun scripts/seed.ts",
-    "deploy": "wrangler deploy"
+    "deploy": "wrangler deploy",
+    "dev:access": "bun scripts/dev-access.ts"
   },
   "dependencies": {
     "hono": "^4.13.14"

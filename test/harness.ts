@@ -84,6 +84,11 @@ export interface Harness {
   clock: { t: number };
   key: KeyPair;
   jwksFetches: { n: number };
+  accessKey: KeyPair;
+  /** a valid Cloudflare Access JWT for the viewer; override claims to break it */
+  accessToken(over?: Record<string, unknown>, key?: KeyPair): Promise<string>;
+  /** GET a viewer path as a signed-in Access user (token: null sends none) */
+  view(path: string, opts?: { token?: string | null; headers?: Record<string, string> }): Promise<{ status: number; headers: Headers; text: string }>;
   setJwks(keys: Jwk[]): void;
   token(over?: Record<string, unknown>, key?: KeyPair, header?: Record<string, unknown>): Promise<string>;
   call(method: string, path: string, opts?: CallOpts): Promise<Res>;
@@ -110,6 +115,8 @@ export async function makeHarness(jwksOpts: { minRefetchMs?: number } = { minRef
     () => clock.t,
     jwksOpts,
   );
+  const accessKey = await makeKeyPair("access-kid");
+  const accessJwks = new JwksCache(async () => ({ keys: [accessKey.jwk] }), () => clock.t, { minRefetchMs: 0 });
   const db = new D1Shim();
   const r2 = new R2Shim();
   const env = {
@@ -121,7 +128,7 @@ export async function makeHarness(jwksOpts: { minRefetchMs?: number } = { minRef
     ACCESS_TEAM_DOMAIN: "https://atomicloud.cloudflareaccess.com",
     ACCESS_AUD: "ab2d52e241e575a8c4df3db1476312906c0e85dc63f675880faa9b15a44423df",
   } satisfies Env;
-  const app = buildApp({ jwks, now: () => clock.t });
+  const app = buildApp({ jwks, now: () => clock.t, accessJwks });
   const h: Harness = {
     db,
     r2,
@@ -129,7 +136,17 @@ export async function makeHarness(jwksOpts: { minRefetchMs?: number } = { minRef
     clock,
     key,
     jwksFetches,
+    accessKey,
     app,
+    accessToken: (over = {}, k = accessKey) =>
+      signJwt(k, { iss: env.ACCESS_TEAM_DOMAIN, aud: [env.ACCESS_AUD], iat: Math.floor(clock.t / 1000), nbf: Math.floor(clock.t / 1000), exp: Math.floor(clock.t / 1000) + 3600, email: "dev@example.com", ...over }),
+    async view(path, opts = {}) {
+      const headers: Record<string, string> = { ...(opts.headers ?? {}) };
+      const tok = opts.token === undefined ? await h.accessToken() : opts.token;
+      if (tok !== null) headers["cf-access-jwt-assertion"] = tok;
+      const res = await app.request(path, { headers }, env);
+      return { status: res.status, headers: res.headers, text: await res.text() };
+    },
     setJwks: (k) => {
       keys = k;
     },

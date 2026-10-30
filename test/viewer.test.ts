@@ -5,10 +5,7 @@ import { FLAKY_ID, NEW_ID, PR_HEAD, REPO, XSS_ID, seedDemo, shaN, type Seeded } 
 let h: Harness;
 let s: Seeded;
 const base = `/${REPO.owner}/${REPO.name}`;
-const get = async (path: string) => {
-  const res = await h.app.request(path, {}, h.env);
-  return { status: res.status, headers: res.headers, text: await res.text() };
-};
+const get = (path: string) => h.view(path);
 
 beforeAll(async () => {
   h = await makeHarness();

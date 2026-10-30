@@ -20,7 +20,8 @@ h1{font-size:1.4rem;margin:12px 0 4px}h2{font-size:1.1rem;margin:24px 0 8px}h3{f
 .chip{display:inline-block;font-size:.8rem;font-weight:600;padding:1px 8px;border-radius:99px;border:1px solid currentColor;white-space:nowrap}
 .tone-ok .chip,.chip.tone-ok{color:var(--ok);background:var(--okbg)}.chip.tone-bad{color:var(--bad);background:var(--badbg)}.chip.tone-warn{color:var(--warn);background:var(--warnbg)}.chip.tone-idle{color:var(--idle);background:var(--idlebg)}
 .banner{border:1px solid;border-left-width:6px;border-radius:8px;padding:8px 16px;margin:12px 0}
-.banner h2{margin:4px 0}.banner ul{margin:4px 0;padding-left:20px}.banner li a{display:inline-block;padding:8px 0;min-height:44px}
+.banner h2{margin:4px 0}.banner ul{margin:4px 0;padding-left:20px}.banner li a{display:block;padding:8px 0;min-height:44px}
+details.tests{margin:12px 0}details.tests .where{color:var(--muted);font-size:.85rem;word-break:break-all}
 .banner.tone-bad{border-color:var(--bad);background:var(--badbg)}.banner.tone-idle{border-color:var(--idle);background:var(--idlebg)}
 .cards{display:grid;gap:12px;grid-template-columns:1fr}
 @media(min-width:860px){.cards{grid-template-columns:1fr 1fr}}

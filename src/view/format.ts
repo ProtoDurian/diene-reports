@@ -59,16 +59,22 @@ export const STATES: Record<string, StateInfo> = {
   lost: { label: "lost", tone: "bad", rank: 6 },
   cancelled: { label: "cancelled", tone: "warn", rank: 5 },
   no_report: { label: "no report", tone: "warn", rank: 4 },
+  job_failed: { label: "job failed", tone: "warn", rank: 4 },
   started: { label: "running", tone: "idle", rank: 3 },
   inactive: { label: "inactive", tone: "idle", rank: 1 },
 };
 
 export const stateInfo = (s: string): StateInfo => STATES[s] ?? { label: s, tone: "idle", rank: 2 };
 
-/** worst state of a set of runs; a "passed" run whose job failed after the tests counts as a warning */
-export function worstState(runs: { state: string }[]): string {
+type StateLike = { state: string; job_failed_after_tests?: number };
+
+/** the state to show: a "passed" run whose job failed after the tests is its own warning state */
+export const effState = (r: StateLike): string => (r.state === "passed" && r.job_failed_after_tests ? "job_failed" : r.state);
+
+/** worst state of a set of runs */
+export function worstState(runs: StateLike[]): string {
   let best = "passed";
-  for (const r of runs) if (stateInfo(r.state).rank > stateInfo(best).rank) best = r.state;
+  for (const r of runs) if (stateInfo(effState(r)).rank > stateInfo(best).rank) best = effState(r);
   return runs.length ? best : "inactive";
 }
 
@@ -149,4 +155,4 @@ export const ghRun = (owner: string, repo: string, r: { gh_run_id: number; gh_ru
 
 /** worst first, then by flag name, so failed runs lead the page */
 export const bySeverity = (runs: RunRow[]): RunRow[] =>
-  [...runs].sort((a, b) => stateInfo(b.state).rank - stateInfo(a.state).rank || a.flag.localeCompare(b.flag));
+  [...runs].sort((a, b) => stateInfo(effState(b)).rank - stateInfo(effState(a)).rank || a.flag.localeCompare(b.flag));

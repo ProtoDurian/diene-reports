@@ -43,6 +43,7 @@ export function latestPerJob(rows: RunRow[]): RunRow[] {
   return [...best.values()].sort((a, b) => a.flag.localeCompare(b.flag) || a.job.localeCompare(b.job));
 }
 
+/** `sha` must be a full 40-character commit id (the routes enforce it) */
 export async function runsForSha(env: Env, repoId: number, sha: string): Promise<RunRow[]> {
   const bySha = await env.DB.prepare(`SELECT * FROM runs WHERE repo_id = ?1 AND sha = ?2 ${LATEST}`).bind(repoId, sha).all<RunRow>();
   if (bySha.results.length) return bySha.results;
@@ -86,19 +87,45 @@ export async function projectId(env: Env, repoId: number, branch: string): Promi
   return r ? r.project_id : null;
 }
 
-export async function branchHeads(env: Env, pid: number): Promise<RunRow[]> {
-  return (await env.DB.prepare(`SELECT r.* FROM branch_head h JOIN runs r ON r.id = h.run_id WHERE h.project_id = ?1 ORDER BY r.flag`).bind(pid).all<RunRow>()).results;
+/** run = newest finished branch run with tests or coverage; cov = newest finished branch run with coverage */
+export interface Head {
+  flag: string;
+  run: RunRow;
+  cov: RunRow | null;
 }
+
+export async function branchHeads(env: Env, pid: number): Promise<Head[]> {
+  const res = await env.DB
+    .prepare(
+      `SELECT h.cov_run_id AS h_cov, r.* FROM branch_head h JOIN runs r ON r.id = h.run_id WHERE h.project_id = ?1 ORDER BY r.flag`,
+    )
+    .bind(pid)
+    .all<RunRow & { h_cov: number | null }>();
+  const ids = res.results.map((r) => r.h_cov).filter((x): x is number => x !== null);
+  const covs = new Map<number, RunRow>();
+  if (ids.length) {
+    const c = await env.DB.prepare(`SELECT * FROM runs WHERE id IN (SELECT value FROM json_each(?1))`).bind(JSON.stringify(ids)).all<RunRow>();
+    for (const r of c.results) covs.set(r.id, r);
+  }
+  return res.results.map(({ h_cov, ...run }) => ({ flag: run.flag, run: run as RunRow, cov: h_cov === null ? null : (covs.get(h_cov) ?? null) }));
+}
+
+/** the head run with its coverage columns taken from the coverage head, for rows that show state + coverage */
+export const headWithCoverage = (h: Head): RunRow =>
+  h.cov ? { ...h.run, cov_lines: h.cov.cov_lines, cov_lines_hit: h.cov.cov_lines_hit, cov_partial: h.cov.cov_partial } : h.run;
 
 export async function homeRows(env: Env) {
   const res = await env.DB
     .prepare(
-      `SELECT rp.owner, rp.name, rp.visibility, p.branch, r.* FROM branch_head h
+      `SELECT rp.owner, rp.name, rp.visibility, p.branch, c.cov_lines AS c_lines, c.cov_lines_hit AS c_hit, c.cov_partial AS c_partial, r.* FROM branch_head h
        JOIN projects p ON p.project_id = h.project_id JOIN repos rp ON rp.repo_id = p.repo_id JOIN runs r ON r.id = h.run_id
+       LEFT JOIN runs c ON c.id = h.cov_run_id
        ORDER BY rp.owner, rp.name, p.branch, r.flag`,
     )
-    .all<RunRow & { owner: string; name: string; visibility: string }>();
-  return res.results;
+    .all<RunRow & { owner: string; name: string; visibility: string; c_lines: number | null; c_hit: number | null; c_partial: number | null }>();
+  return res.results.map(({ c_lines, c_hit, c_partial, ...r }) =>
+    c_lines === null ? r : { ...r, cov_lines: c_lines, cov_lines_hit: c_hit, cov_partial: c_partial ?? 0 },
+  );
 }
 
 export async function recentCommits(env: Env, pid: number, limit = 25) {
@@ -128,16 +155,18 @@ export async function recentPrs(env: Env, pid: number, limit = 15) {
     )
     .bind(pid, limit)
     .all<{ pr: number; last_run: number; at: number }>();
-  const out = [];
-  for (const p of res.results) {
-    const runs = await env.DB
-      .prepare(`SELECT * FROM runs WHERE project_id = ?1 AND lane = 'pr' AND pr = ?2 ${LATEST} LIMIT 50`)
-      .bind(pid, p.pr)
-      .all<RunRow>();
-    const head = runs.results[0]?.head_sha;
-    out.push({ ...p, head, runs: latestPerJob(runs.results.filter((r) => r.head_sha === head)) });
-  }
-  return out;
+  if (!res.results.length) return [];
+  const all = await env.DB
+    .prepare(`SELECT * FROM runs WHERE project_id = ?1 AND lane = 'pr' AND pr IN (SELECT value FROM json_each(?2)) ${LATEST} LIMIT 1500`)
+    .bind(pid, JSON.stringify(res.results.map((p) => p.pr)))
+    .all<RunRow>();
+  const byPr = new Map<number, RunRow[]>();
+  for (const r of all.results) (byPr.get(r.pr!) ?? byPr.set(r.pr!, []).get(r.pr!)!).push(r);
+  return res.results.map((p) => {
+    const runs = (byPr.get(p.pr) ?? []).slice(0, 50);
+    const head = runs[0]?.head_sha;
+    return { ...p, head, runs: latestPerJob(runs.filter((r) => r.head_sha === head)) };
+  });
 }
 
 export async function covTrend(env: Env, pid: number, flag: string, limit = 40) {
@@ -171,8 +200,12 @@ export interface TestHistoryRow {
   is_flaky: number | null;
 }
 
+/**
+ * Only failures are stored, so "no failure" cannot tell a pass from a run where the test did not exist or was
+ * skipped. The list stops at the oldest recorded failure (the test certainly existed from there on).
+ */
 export async function testHistory(env: Env, pid: number, flag: string, testId: string, limit = 60) {
-  return (
+  const rows = (
     await env.DB
       .prepare(
         `SELECT r.id, r.sha, r.head_sha, COALESCE(r.finished_at, r.created_at) AS at, r.gh_run_id,
@@ -184,6 +217,11 @@ export async function testHistory(env: Env, pid: number, flag: string, testId: s
       .bind(pid, flag, testId, limit)
       .all<TestHistoryRow>()
   ).results;
+  let oldest = -1;
+  rows.forEach((r, i) => {
+    if (r.failed) oldest = i;
+  });
+  return rows.slice(0, oldest + 1);
 }
 
 export async function testStatsFor(env: Env, pid: number, testId: string) {

@@ -1,15 +1,15 @@
-import { Hono, type Context } from "hono";
+import { Hono, type Context, type MiddlewareHandler } from "hono";
 import type { Env } from "../env";
 import { HttpError } from "../http";
 import { CSS, LINE_JS } from "./assets";
 import { badge } from "./badge";
 import { findRepo, runById } from "./data";
 import { page, CSP, html, type Raw } from "./html";
-import { NotFound, commitPage, coveragePage, filePage, homePage, prPage, repoPage, testPage } from "./pages";
+import { NotFound, commitPage, coveragePage, filePage, homePage, prPage, repoPage, runTestsPage, testPage } from "./pages";
 
 type V = { Bindings: Env };
 
-const SHA_RE = /^[0-9a-f]{7,64}$/i;
+const SHA_RE = /^[0-9a-f]{40}$/i;
 const NAME_RE = /^[A-Za-z0-9._-]{1,100}$/;
 
 const secure = (c: Context, csp = CSP) => {
@@ -37,12 +37,13 @@ export function viewerErrors(c: Context, err: unknown) {
 }
 
 const guardSha = (sha: string) => {
-  if (!SHA_RE.test(sha)) throw new NotFound("That commit id does not look right.");
+  if (!SHA_RE.test(sha)) throw new NotFound("That commit id does not look right (use the full 40-character id).");
   return sha.toLowerCase();
 };
 
-export function mountViewer(app: Hono<any>) {
+export function mountViewer(app: Hono<any>, guard: MiddlewareHandler<V>) {
   const v = app as unknown as Hono<V>;
+  v.use("*", guard);
 
   v.get("/assets/app.css", (c) => {
     c.header("Content-Type", "text/css; charset=utf-8");
@@ -78,11 +79,19 @@ export function mountViewer(app: Hono<any>) {
     if (!run) throw new NotFound("Unknown run.");
     const obj = await c.env.BUCKET.get(`raw/${run.repo_id}/${run.sha}/${run.gh_run_id}-${run.gh_run_attempt}/${run.flag}/${name}.gz`);
     if (!obj) throw new NotFound("That file has expired or was never uploaded.");
+    const bytes = new Uint8Array(await obj.arrayBuffer());
+    if (bytes.length < 2 || bytes[0] !== 0x1f || bytes[1] !== 0x8b) throw new NotFound("That file is not readable (it was not uploaded as gzip).");
     secure(c, "default-src 'none'; sandbox");
     c.header("Content-Type", "application/octet-stream");
     c.header("Content-Disposition", `attachment; filename="${name}"`);
     c.header("Cache-Control", "private, no-cache");
-    return c.body(obj.body.pipeThrough(new DecompressionStream("gzip")) as ReadableStream);
+    return c.body(new Blob([bytes]).stream().pipeThrough(new DecompressionStream("gzip")) as ReadableStream);
+  });
+
+  v.get("/:owner/:repo/run/:id/tests", async (c) => {
+    const id = c.req.param("id");
+    if (!/^\d{1,15}$/.test(id)) throw new NotFound("No such run.");
+    return sendHtml(c, await runTestsPage(c.env, c.req.param("owner"), c.req.param("repo"), Number(id)));
   });
 
   v.get("/:owner/:repo/commit/:sha/coverage", async (c) => {

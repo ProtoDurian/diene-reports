@@ -1,5 +1,5 @@
 import { enc, html, type Raw } from "./html";
-import { explain, fmtDuration, fmtPct, ghBlob, ghRun, parseJsonList, pct, stateInfo, type RunRow } from "./format";
+import { effState, explain, fmtDuration, fmtPct, ghBlob, ghRun, parseJsonList, pct, stateInfo, type RunRow } from "./format";
 import type { FailureRow } from "./data";
 import type { SummaryDoc } from "./store";
 
@@ -11,6 +11,7 @@ export const covUrl = (owner: string, name: string, sha: string, flag?: string) 
 export const fileUrl = (owner: string, name: string, sha: string, path: string, flag: string, line?: number) =>
   `${commitUrl(owner, name, sha)}/file?path=${enc(path)}&flag=${enc(flag)}${line ? `#L${line}` : ""}`;
 export const prUrl = (owner: string, name: string, n: number) => `/${enc(owner)}/${enc(name)}/pull/${n}`;
+export const runTestsUrl = (owner: string, name: string, runId: number) => `/${enc(owner)}/${enc(name)}/run/${runId}/tests`;
 export const testUrl = (owner: string, name: string, id: string, branch: string) => `/${enc(owner)}/${enc(name)}/test/${enc(id)}?branch=${enc(branch)}`;
 
 export function chip(state: string, extra = ""): Raw {
@@ -25,9 +26,13 @@ export function covBar(p: number | null): Raw {
 }
 
 export function banner(runs: RunRow[]): Raw | "" {
-  const lines = runs.map((r) => ({ r, text: explain(r) })).filter((x): x is { r: RunRow; text: string } => !!x.text);
+  // inactive means "nothing to run": not a problem, so it stays out of the banner (its card says so, neutrally)
+  const lines = runs
+    .filter((r) => r.state !== "inactive")
+    .map((r) => ({ r, text: explain(r) }))
+    .filter((x): x is { r: RunRow; text: string } => !!x.text);
   if (!lines.length) return "";
-  const bad = lines.some((l) => ["bad", "warn"].includes(stateInfo(l.r.state).tone) || l.r.job_failed_after_tests);
+  const bad = lines.some((l) => ["bad", "warn"].includes(stateInfo(effState(l.r)).tone));
   return html`<section class="banner tone-${bad ? "bad" : "idle"}" role="status">
     <h2>${bad ? "Not everything went well" : "Heads up"}</h2>
     <ul>${lines.map((l) => html`<li><a href="#run-${l.r.id}">${l.text}</a></li>`)}</ul>
@@ -62,7 +67,8 @@ export interface CardCtx {
 }
 
 export function runCard(r: RunRow, c: CardCtx): Raw {
-  const info = stateInfo(r.state);
+  const state = effState(r);
+  const info = stateInfo(state);
   const notes = parseJsonList(r.notes);
   const warnings = parseJsonList(r.warnings);
   const covP = pct(r.cov_lines_hit, r.cov_lines);
@@ -71,8 +77,8 @@ export function runCard(r: RunRow, c: CardCtx): Raw {
   const hasTests = r.t_total !== null;
   const jobLabel = r.job !== r.flag ? ` (job ${r.job})` : "";
   const delta = c.baseCov !== undefined && c.baseCov !== null && covP !== null ? covP - c.baseCov : null;
-  return html`<section class="card tone-${r.job_failed_after_tests && r.state === "passed" ? "warn" : info.tone}" id="run-${r.id}">
-    <h3><span class="flag">${r.flag}${jobLabel}</span> ${chip(r.state, r.state === "errored" && r.sub_reason ? ` · ${r.sub_reason}` : "")}</h3>
+  return html`<section class="card tone-${info.tone}" id="run-${r.id}">
+    <h3><span class="flag">${r.flag}${jobLabel}</span> ${chip(state, r.state === "errored" && r.sub_reason ? ` · ${r.sub_reason}` : "")}</h3>
     ${why ? html`<p class="why">${why}</p>` : ""}
     <dl class="stats">
       <div><dt>Tests</dt><dd>${
@@ -89,12 +95,13 @@ export function runCard(r: RunRow, c: CardCtx): Raw {
       ${patchP !== null ? html`<div><dt>Patch coverage</dt><dd>${covBar(patchP)} <strong>${fmtPct(patchP)}</strong> · ${r.patch_lines_hit}/${r.patch_lines} changed lines</dd></div>` : ""}
     </dl>
     ${r.over_cap ? html`<p class="note">This run was over the size cap: counts are shown, full details were not uploaded.</p>` : ""}
-    ${r.failures_truncated ? html`<p class="note">Only the first 200 failures are kept.</p>` : ""}
+    ${r.failures_truncated ? html`<p class="note">This list is capped at 200 failures${hasTests && !r.over_cap ? html`; <a href="${runTestsUrl(c.owner, c.name, r.id)}">the all-tests page</a> lists every test from the full report` : ""}.</p>` : ""}
     ${notes.length ? html`<ul class="notes">${notes.map((n) => html`<li>${n}</li>`)}</ul>` : ""}
     ${warnings.length ? html`<details class="warnings"><summary>${warnings.length} warning${warnings.length === 1 ? "" : "s"}</summary><ul>${warnings.map((n) => html`<li>${n}</li>`)}</ul></details>` : ""}
     ${c.failures.length ? html`<div class="fails"><h4 class="sec">Failures (${c.failures.length}${r.failures_truncated ? "+" : ""})</h4>${c.failures.map((f) => failureCard(f, c.owner, c.name, r.head_sha, c.testBranch))}</div>` : ""}
     <p class="links">
       <a class="btn" href="${ghRun(c.owner, c.name, r)}" rel="noopener noreferrer">GitHub job run</a>
+      ${hasTests && !r.over_cap ? html`<a class="btn" href="${runTestsUrl(c.owner, c.name, r.id)}">All tests</a>` : ""}
       ${covP !== null ? html`<a class="btn" href="${covUrl(c.owner, c.name, r.sha, r.flag)}">Coverage files</a>` : ""}
       ${(c.summary?.raw ?? []).map((x) => html`<a class="btn" href="/${enc(c.owner)}/${enc(c.name)}/run/${r.id}/raw/${enc(x.name)}" download>${x.name}</a>`)}
     </p>

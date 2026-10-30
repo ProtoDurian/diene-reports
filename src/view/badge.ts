@@ -27,9 +27,9 @@ export async function badge(env: Env, owner: string, name: string, flag: string,
   const pid = await projectId(env, repo.repo_id, branch);
   if (pid === null) return svgBadge(flag, "unknown", COLORS.grey);
   const heads = await branchHeads(env, pid);
-  if (flag === "tests") return testsBadge(heads);
-  const h = heads.find((x) => x.flag === flag);
-  const p = h ? pct(h.cov_lines_hit, h.cov_lines) : null;
+  if (flag === "tests") return testsBadge(heads.map((h) => h.run));
+  const c = heads.find((x) => x.flag === flag)?.cov;
+  const p = c ? pct(c.cov_lines_hit, c.cov_lines) : null;
   if (p === null) return svgBadge(`coverage ${flag}`, "unknown", COLORS.grey);
   return svgBadge(`coverage ${flag}`, fmtPct(p), coverageColor(p));
 }

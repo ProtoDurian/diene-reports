@@ -8,11 +8,14 @@ import { finishRun, knownFailing, ownedRun, startRun } from "./runs";
 import { attribution, checkSources, putSource } from "./sources";
 import { NotFound } from "./view/pages";
 import { mountViewer, viewerErrors } from "./view/routes";
+import { accessGuard, accessJwksFor } from "./view/access";
 import { parseFlag, parseStart, parseSummary } from "./summary";
 
 export interface Deps {
   jwks: JwksProvider;
   now: () => number;
+  /** Cloudflare Access signing keys; tests inject their own */
+  accessJwks?: JwksProvider;
 }
 
 type App = { Bindings: Env; Variables: { id: Identity } };
@@ -23,7 +26,7 @@ function defaultJwks(): JwksProvider {
 }
 
 export function buildApp(overrides: Partial<Deps> = {}) {
-  const deps: Deps = { jwks: overrides.jwks ?? defaultJwks(), now: overrides.now ?? (() => Date.now()) };
+  const deps: Deps = { jwks: overrides.jwks ?? defaultJwks(), now: overrides.now ?? (() => Date.now()), accessJwks: overrides.accessJwks };
   const app = new Hono<App>();
 
   const isApi = (path: string) => path.startsWith("/api/") || path === "/healthz";
@@ -119,7 +122,7 @@ export function buildApp(overrides: Partial<Deps> = {}) {
   });
 
   app.route("/api/v1", api);
-  mountViewer(app);
+  mountViewer(app, accessGuard((env) => deps.accessJwks ?? accessJwksFor(env, deps.now), deps.now));
   return app;
 }
 

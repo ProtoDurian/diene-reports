@@ -1,14 +1,14 @@
 import type { Env } from "../env";
 import {
-  banner, chip, commitUrl, covBar, covUrl, fileUrl, prUrl, repoUrl, runCard,
+  banner, chip, commitUrl, covBar, covUrl, fileUrl, prUrl, repoUrl, runCard, runTestsUrl,
 } from "./components";
 import {
   branchHeads, commitInfo, covTrend, failuresFor, findRepo, homeRows, lastFailure, latestPerJob, prRuns, projectId, projectsOf,
-  recentCommits, recentPrs, runsForSha, testHistory, testStatsFor, type Repo,
+  recentCommits, recentPrs, runById, runsForSha, testHistory, testStatsFor, type Repo,
 } from "./data";
-import { bySeverity, fmtPct, fmtTime, ghBase, ghBlob, ghRun, pct, short, stateInfo, worstState, type RunRow } from "./format";
+import { bySeverity, effState, fmtDuration, fmtPct, fmtTime, ghBase, ghBlob, ghRun, pct, short, stateInfo, worstState, type RunRow } from "./format";
 import { enc, html, page, raw, type Raw } from "./html";
-import { loadCovChunk, loadReportDiff, loadSource, loadSummary, type SummaryDoc } from "./store";
+import { loadCovChunk, loadReportDiff, loadSource, loadSummary, loadTestList, type TestCase } from "./store";
 
 export class NotFound extends Error {}
 
@@ -24,7 +24,7 @@ const need = async (env: Env, owner: string, name: string) => {
 function flagChips(runs: RunRow[]): Raw {
   return html`${runs.map((r) => {
     const p = pct(r.cov_lines_hit, r.cov_lines);
-    return html`<span class="flagchip">${r.flag} ${chip(r.job_failed_after_tests && r.state === "passed" ? "no_report" : r.state)}${p !== null ? html` <span class="cov">${fmtPct(p)}</span>` : ""}</span>`;
+    return html`<span class="flagchip">${r.flag} ${chip(effState(r))}${p !== null ? html` <span class="cov">${fmtPct(p)}</span>` : ""}</span>`;
   })}`;
 }
 
@@ -61,7 +61,7 @@ export async function repoPage(env: Env, owner: string, name: string, branchPara
   const pid = await projectId(env, repo.repo_id, branch);
   if (pid === null) throw new NotFound("unknown branch");
   const [heads, commits, prs] = await Promise.all([branchHeads(env, pid), recentCommits(env, pid), recentPrs(env, pid)]);
-  const flags = [...new Set(heads.map((h) => h.flag))];
+  const flags = heads.map((h) => h.flag);
   const trends = await Promise.all(flags.map(async (f) => ({ flag: f, pts: await covTrend(env, pid, f) })));
   return page(
     `${repo.owner}/${repo.name}`,
@@ -69,9 +69,9 @@ export async function repoPage(env: Env, owner: string, name: string, branchPara
     <h1>${repo.owner}/${repo.name} <span class="branch">${branch}</span></h1>
     ${branches.length > 1 ? html`<p class="branches" aria-label="branches">${branches.map((b) => html`<a class="pill${b === branch ? " on" : ""}" href="${repoUrl(repo.owner, repo.name, b)}">${b}</a>`)}</p>` : ""}
     <h2>Latest on this branch</h2>
-    <div class="cards">${heads.map((h) => html`<section class="card tone-${stateInfo(h.state).tone}"><h3><span class="flag">${h.flag}</span> ${chip(h.state)}</h3>
+    <div class="cards">${heads.map(({ run: h, cov: c }) => html`<section class="card tone-${stateInfo(effState(h)).tone}"><h3><span class="flag">${h.flag}</span> ${chip(effState(h))}</h3>
       <p><a href="${commitUrl(repo.owner, repo.name, h.sha)}">${short(h.sha)}</a> · ${fmtTime(h.finished_at ?? h.created_at)}</p>
-      <p>${pct(h.cov_lines_hit, h.cov_lines) !== null ? html`${covBar(pct(h.cov_lines_hit, h.cov_lines))} ${fmtPct(pct(h.cov_lines_hit, h.cov_lines))} coverage` : "no coverage"}
+      <p>${c && pct(c.cov_lines_hit, c.cov_lines) !== null ? html`${covBar(pct(c.cov_lines_hit, c.cov_lines))} ${fmtPct(pct(c.cov_lines_hit, c.cov_lines))} coverage${c.id !== h.id ? html` (from <a href="${commitUrl(repo.owner, repo.name, c.sha)}">${short(c.sha)}</a>)` : ""}` : "no coverage"}
       · ${h.t_total !== null ? `${h.t_failed! + h.t_errored!} failing of ${h.t_total}` : "no test results"}</p></section>`)}</div>
     ${trends.some((t) => t.pts.length > 1) ? html`<h2>Coverage trend</h2>${trends.filter((t) => t.pts.length > 1).map((t) => sparkline(t.flag, t.pts))}` : ""}
     <h2>Recent commits</h2>
@@ -102,7 +102,7 @@ async function cardsFor(env: Env, repo: Repo, runs: RunRow[], testBranch: string
 }
 
 export async function commitPage(env: Env, owner: string, name: string, sha: string): Promise<Raw> {
-  if (!/^[0-9a-f]{7,40}$/i.test(sha)) throw new NotFound("bad sha");
+  if (!/^[0-9a-f]{40}$/i.test(sha)) throw new NotFound("bad sha");
   const repo = await need(env, owner, name);
   const all = await runsForSha(env, repo.repo_id, sha);
   const runs = bySeverity(latestPerJob(all));
@@ -130,12 +130,11 @@ export async function prPage(env: Env, owner: string, name: string, n: number): 
   const base = runs[0]!.branch;
   const pid = await projectId(env, repo.repo_id, base);
   const heads = pid === null ? [] : await branchHeads(env, pid);
-  const baseCov = new Map(heads.map((h) => [h.flag, pct(h.cov_lines_hit, h.cov_lines)] as const));
+  const baseCov = new Map(heads.map((h) => [h.flag, h.cov ? pct(h.cov.cov_lines_hit, h.cov.cov_lines) : null] as const));
   const cards = await cardsFor(env, repo, runs, base, baseCov);
   const sums = await Promise.all(runs.map((r) => loadSummary(env, r)));
   const patchFiles = runs.flatMap((r, i) => (sums[i]?.patch?.files ?? []).filter((f) => f.uncovered.length).map((f) => ({ run: r, f })));
-  const pl = runs.reduce((a, r) => a + (r.patch_lines ?? 0), 0);
-  const ph = runs.reduce((a, r) => a + (r.patch_lines_hit ?? 0), 0);
+  const patchRuns = runs.filter((r) => r.patch_lines !== null);
   const older = [...new Set(all.map((r) => r.head_sha))].filter((s) => s !== head);
   return page(
     `PR #${n} ${repo.owner}/${repo.name}`,
@@ -144,7 +143,10 @@ export async function prPage(env: Env, owner: string, name: string, n: number): 
     <p class="meta">into <a href="${repoUrl(repo.owner, repo.name, base)}">${base}</a> · head <a href="${commitUrl(repo.owner, repo.name, head)}"><code>${short(head)}</code></a> ·
       <a href="${ghBase(repo.owner, repo.name)}/pull/${n}" rel="noopener noreferrer">on GitHub</a></p>
     ${banner(runs)}
-    ${runs.some((r) => r.patch_lines !== null) ? html`<section class="card"><h3>Patch coverage</h3><p>${covBar(pct(ph, pl))} <strong>${fmtPct(pct(ph, pl))}</strong> · ${ph}/${pl} changed lines are covered</p>
+    ${patchRuns.length ? html`<section class="card"><h3>Patch coverage</h3>
+      <p class="meta">Per flag: the same changed line can be counted by more than one flag, so the flags are not added together.</p>
+      <ul class="rows">${patchRuns.map((r) => html`<li class="row"><span class="main"><span class="flag">${r.flag}${r.job !== r.flag ? ` (job ${r.job})` : ""}</span></span>
+        <span class="flags">${covBar(pct(r.patch_lines_hit, r.patch_lines))} <strong>${fmtPct(pct(r.patch_lines_hit, r.patch_lines))}</strong> · ${r.patch_lines_hit}/${r.patch_lines} changed lines covered</span></li>`)}</ul>
       ${patchFiles.length ? html`<h4 class="sec">Changed files with uncovered lines</h4><ul class="rows">${patchFiles.map(({ run, f }) => html`<li class="row">
         <a class="main" href="${fileUrl(repo.owner, repo.name, run.sha, f.path, run.flag, f.uncovered[0])}">${f.path}</a>
         <span class="flags">${f.hit}/${f.lines} · uncovered: ${f.uncovered.slice(0, 12).join(", ")}${f.uncovered.length > 12 ? ", …" : ""}</span></li>`)}</ul>` : html`<p>No uncovered changed lines.</p>`}</section>` : ""}
@@ -228,7 +230,7 @@ export async function coveragePage(env: Env, owner: string, name: string, sha: s
     ${files
       ? html`<p class="sorts">Sort: ${sortLink("name", "name")} ${sortLink("pct", "lowest first")} ${sortLink("size", "largest")}</p>
         <ul class="tree">${renderNode(buildTree(files), { repo, sha: run.sha, flag, sort }, 0)}</ul>`
-      : html`<p class="empty">${run.over_cap ? "This run was over the size cap, so per-file coverage was not uploaded." : "The per-file detail has expired (kept 90 days). Totals above come from the database."}</p>`}`,
+      : html`<p class="empty">${run.over_cap ? "This run was over the size cap, so per-file coverage was not uploaded." : "The per-file detail has expired (non-head runs are kept 90 days). Totals above come from the database."}</p>`}`,
   );
 }
 
@@ -298,9 +300,56 @@ export async function testPage(env: Env, owner: string, name: string, testId: st
     <p class="meta"><code>${testId}</code> · ${flag} · branch <a href="${repoUrl(repo.owner, repo.name, branch)}">${branch}</a>${stats?.file ? html` · ${stats.file}` : ""}</p>
     ${stats ? html`<p>${stats.last_status === "failed" ? chip("tests_failed") : chip("passed")} ${stats.fails_30d} failure${stats.fails_30d === 1 ? "" : "s"} and ${stats.flips_30d} pass/fail flip${stats.flips_30d === 1 ? "" : "s"} in the last 30 days${stats.flaky_since ? html` · <span class="tag tag-flaky">FLAKY</span> since ${fmtTime(stats.flaky_since)}` : ""}</p>` : ""}
     <h2>History (newest first)</h2>
-    <p class="strip" aria-label="history strip">${hist.map((h) => html`<a class="cell ${h.failed ? (h.is_flaky ? "flaky" : "fail") : "pass"}" href="${commitUrl(repo.owner, repo.name, h.sha)}" title="${short(h.sha)} ${h.failed ? "failed" : "passed"}"><span class="sr">${short(h.sha)} ${h.failed ? "failed" : "passed"}</span></a>`)}</p>
-    <ul class="rows">${hist.map((h) => html`<li class="row tone-${h.failed ? "bad" : "ok"}"><a class="main" href="${commitUrl(repo.owner, repo.name, h.sha)}"><code>${short(h.sha)}</code> ${h.failed ? "failed" : "passed"}</a><span class="flags">${fmtTime(h.at)}</span></li>`)}</ul>
+    <p class="meta">Only failures are stored, so a run without a failure is shown as "no failure reported", not as a confirmed pass (the test may have been skipped). The list stops at the oldest recorded failure.</p>
+    <p class="strip" aria-label="history strip">${hist.map((h) => html`<a class="cell ${h.failed ? (h.is_flaky ? "flaky" : "fail") : "pass"}" href="${commitUrl(repo.owner, repo.name, h.sha)}" title="${short(h.sha)} ${h.failed ? "failed" : "no failure reported"}"><span class="sr">${short(h.sha)} ${h.failed ? "failed" : "no failure reported"}</span></a>`)}</p>
+    <ul class="rows">${hist.map((h) => html`<li class="row tone-${h.failed ? "bad" : "ok"}"><a class="main" href="${commitUrl(repo.owner, repo.name, h.sha)}"><code>${short(h.sha)}</code> ${h.failed ? "failed" : "no failure reported"}</a><span class="flags">${fmtTime(h.at)}</span></li>`)}</ul>
     ${last ? html`<h2>Last failure</h2><p class="meta"><a href="${commitUrl(repo.owner, repo.name, last.sha)}"><code>${short(last.sha)}</code></a> · ${fmtTime(last.finished_at)}</p>
       ${last.message ? html`<pre class="msg">${last.message}</pre>` : ""}${last.stack ? html`<details class="stack"><summary>Stack trace</summary><pre>${last.stack}</pre></details>` : ""}` : ""}`,
+  );
+}
+
+// ----------------------------------------------------------------------------- all tests of one run
+
+const GROUPS: { status: TestCase["status"]; title: string; open: boolean }[] = [
+  { status: "failed", title: "Failed", open: true },
+  { status: "errored", title: "Errored", open: true },
+  { status: "skipped", title: "Skipped", open: false },
+  { status: "passed", title: "Passed", open: false },
+];
+const SHOW_MAX = 2000;
+
+export async function runTestsPage(env: Env, owner: string, name: string, runId: number): Promise<Raw> {
+  const repo = await need(env, owner, name);
+  const run = await runById(env, repo.repo_id, runId);
+  if (!run) throw new NotFound("unknown run");
+  const list = await loadTestList(env, run);
+  const jobLabel = run.job !== run.flag ? ` (job ${run.job})` : "";
+  const head = html`${crumbs(repo, run.lane === "branch" ? run.branch : null)}
+    <h1>All tests <span class="branch">${run.flag}${jobLabel}</span></h1>
+    <p class="meta"><a href="${commitUrl(repo.owner, repo.name, run.sha)}#run-${run.id}"><code>${short(run.sha)}</code> run results</a> · ${chip(effState(run))}${run.t_total !== null ? html` · ${run.t_total} total · ${run.t_passed} passed · ${run.t_failed} failed · ${run.t_errored} errored · ${run.t_skipped} skipped` : ""}</p>`;
+  const title = `Tests ${run.flag} ${short(run.sha)} ${repo.owner}/${repo.name}`;
+  if (list.kind !== "ok") {
+    const why =
+      list.kind === "too_large"
+        ? `The full report is ${(list.bytes / 1048576).toFixed(1)} MB compressed, too large to list here. The counts above and the failures on the commit page are still correct.`
+        : list.kind === "unreadable"
+          ? "The full report could not be read. The counts above and the failures on the commit page are still correct."
+          : run.over_cap
+            ? "This run was over the size cap, so the full report was not uploaded."
+            : "The full report is not available: it was never uploaded, or it expired (kept 90 days).";
+    return page(title, html`${head}<p class="empty">${why}</p>`);
+  }
+  const by = new Map<string, TestCase[]>();
+  for (const c of list.cases) (by.get(c.status) ?? by.set(c.status, []).get(c.status)!).push(c);
+  return page(
+    title,
+    html`${head}${list.cases.length === 0 ? html`<p class="empty">The report contains no test cases.</p>` : ""}
+    ${GROUPS.map((g) => {
+      const items = by.get(g.status) ?? [];
+      if (!items.length) return "";
+      return html`<details class="tests"${g.open ? raw(" open") : ""}><summary><span class="chip tone-${g.status === "passed" ? "ok" : g.status === "skipped" ? "idle" : "bad"}">${g.title}</span> ${items.length}</summary>
+        <ul class="rows">${items.slice(0, SHOW_MAX).map((c) => html`<li class="row"><span class="main">${c.suite ? `${c.suite} › ` : ""}${c.name}${c.file ? html` <span class="where">${c.file}${c.line ? `:${c.line}` : ""}</span>` : ""}</span><span class="flags">${c.durationMs !== null ? fmtDuration(c.durationMs) : ""}</span></li>`)}</ul>
+        ${items.length > SHOW_MAX ? html`<p class="note">Showing the first ${SHOW_MAX} of ${items.length}.</p>` : ""}</details>`;
+    })}`,
   );
 }
