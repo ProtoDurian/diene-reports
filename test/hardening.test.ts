@@ -166,8 +166,8 @@ describe("visibility cron", () => {
     expect((await h.view(demo)).status).toBe(404);
   });
 
-  test("404 and 401 fail closed: the repo is marked private", async () => {
-    for (const status of [404, 401]) {
+  test("404 fails closed: the repo is marked private", async () => {
+    for (const status of [404]) {
       await h.env.DB.prepare(`UPDATE repos SET visibility = 'public' WHERE repo_id = ?1`).bind(PUB_ID).run();
       h.gh.repos.set(PUB_ID, { status });
       await sweep();
@@ -175,10 +175,10 @@ describe("visibility cron", () => {
     }
   });
 
-  test("other errors (5xx, rate limit, network) leave the repo as it was", async () => {
+  test("other errors (bad app credentials 401, 5xx, rate limit, network) leave the repo as it was", async () => {
     const before = await repoRow(PUB_ID);
     h.clock.t += 31 * 60_000;
-    for (const status of [500, 502, 403, 429]) {
+    for (const status of [500, 502, 403, 429, 401]) {
       h.gh.repos.set(PUB_ID, { status });
       await sweep();
     }
