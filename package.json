@@ -6,7 +6,9 @@
     "typecheck": "tsc --noEmit",
     "test": "bun test",
     "dev": "wrangler dev",
-    "deploy": "wrangler deploy"
+    "seed": "bun scripts/seed.ts",
+    "deploy": "wrangler deploy",
+    "dev:access": "bun scripts/dev-access.ts"
   },
   "dependencies": {
     "hono": "^4.13.14"

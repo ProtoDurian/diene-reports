@@ -6,11 +6,16 @@ import { HttpError, putBody, readCapped, readJson } from "./http";
 import { guard } from "./db";
 import { finishRun, knownFailing, ownedRun, startRun } from "./runs";
 import { attribution, checkSources, putSource } from "./sources";
+import { NotFound } from "./view/pages";
+import { mountViewer, viewerErrors } from "./view/routes";
+import { accessGuard, accessJwksFor } from "./view/access";
 import { parseFlag, parseStart, parseSummary } from "./summary";
 
 export interface Deps {
   jwks: JwksProvider;
   now: () => number;
+  /** Cloudflare Access signing keys; tests inject their own */
+  accessJwks?: JwksProvider;
 }
 
 type App = { Bindings: Env; Variables: { id: Identity } };
@@ -21,15 +26,18 @@ function defaultJwks(): JwksProvider {
 }
 
 export function buildApp(overrides: Partial<Deps> = {}) {
-  const deps: Deps = { jwks: overrides.jwks ?? defaultJwks(), now: overrides.now ?? (() => Date.now()) };
+  const deps: Deps = { jwks: overrides.jwks ?? defaultJwks(), now: overrides.now ?? (() => Date.now()), accessJwks: overrides.accessJwks };
   const app = new Hono<App>();
 
+  const isApi = (path: string) => path.startsWith("/api/") || path === "/healthz";
+
   app.onError((err, c) => {
+    if (!isApi(c.req.path)) return viewerErrors(c, err);
     if (err instanceof HttpError) return c.json({ error: err.message }, err.status as 400);
     console.error("unhandled", err);
     return c.json({ error: "internal error" }, 500);
   });
-  app.notFound((c) => c.json({ error: "not found" }, 404));
+  app.notFound((c) => (isApi(c.req.path) ? c.json({ error: "not found" }, 404) : viewerErrors(c, new NotFound("That page does not exist."))));
 
   app.get("/healthz", (c) => c.json({ ok: true }));
 
@@ -114,6 +122,7 @@ export function buildApp(overrides: Partial<Deps> = {}) {
   });
 
   app.route("/api/v1", api);
+  mountViewer(app, accessGuard((env) => deps.accessJwks ?? accessJwksFor(env, deps.now), deps.now));
   return app;
 }
 

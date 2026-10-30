@@ -63,3 +63,39 @@
 23. **`workers.dev` deviation from CONTRACT §0.** `workers_dev` is `false`, so the Worker is **not** reachable at
     `diene-reports.kirinnee.workers.dev` (that host sits outside Cloudflare Access). Only `reports.atomi.cloud` serves it.
     The viewer additionally verifies the `Cf-Access-Jwt-Assertion` JWT itself (vars `ACCESS_TEAM_DOMAIN`, `ACCESS_AUD`) and answers `403` without it.
+
+## Viewer (PR 2)
+
+24. **Flag chooser, no cross-flag merge.** `/commit/<sha>/coverage` without `?flag=` and with several flags shows a chooser
+    instead of merging flags (each flag measures a different test run).
+25. **`tests` badge name is reserved.** `/badge/<o>/<r>/tests.svg` is the pass/fail badge; a coverage flag called `tests`
+    has no badge. Other flags give coverage badges. Unknown repo/branch/flag → grey "unknown"; private repo → grey "private".
+26. **Raw downloads** are served by run id: `/<owner>/<repo>/run/<id>/raw/<name>`, gunzipped, `Content-Disposition: attachment`,
+    `application/octet-stream`, CSP `default-src 'none'; sandbox`.
+27. **Changed lines on the file page** come from the report's `diff.files` when the stored report is ≤ 6 MB; above that, only
+    the patch's uncovered changed lines are marked. Source and report expire from R2 (90 d); the page then links to GitHub.
+28. **Commit/PR pages** list the worst state first (tests failed, errored, timed out, lost, cancelled, no report, running,
+    inactive, passed), then by flag name. For a commit the pages use the latest attempt per job.
+29. **Times** are shown in UTC. Coverage colours: ≥ 80 % green, ≥ 60 % amber, else red.
+30. **The viewer checks Cloudflare Access itself** (review #4). Every route except `/healthz`, `/api/v1/*` and
+    `/badge/<owner>/<repo>/<flag>` needs a valid `Cf-Access-Jwt-Assertion` (RS256, `iss` = ACCESS_TEAM_DOMAIN, `aud` contains
+    ACCESS_AUD, exp/nbf with 60 s skew; keys from `<team>/cdn-cgi/access/certs`). Anything else is 403 (fail closed, also when
+    the vars are empty). `/assets/*` is guarded. An owner named `api` or `badge` cannot bypass it. **Deviation from §0:**
+    `workers_dev` stays `false`; the Worker is only reachable at `reports.atomi.cloud`.
+31. **Badges and heads** (review #1). `branch_head` is set on finish only. The tests badge uses the newest finished branch run
+    with tests or coverage; the coverage badge uses the newest finished branch run with coverage (`cov_run_id`). A started,
+    cancelled or crashed newer run no longer blanks them. Home and repo pages show coverage from that run and say which commit it is from.
+32. **keep/ fallback** (review #2). The viewer reads `sum/`, `cov/` and `rep/` first and falls back to the `keep/` copy of the
+    branch-head run, which never expires. Non-head runs expire after 90 days and the page says so.
+33. **All-tests page** (review #3): `/:owner/:repo/run/:id/tests` lists every test of a run from `rep/` (failed and errored open;
+    skipped and passed folded, 2000 per group). If the gzipped report is over 5 MiB, or has expired, the page says so.
+    The 200-failure cap note on the run card links to it.
+34. **Stored documents are sanitized when read** (review #5): malformed coverage/patch/sources/raw entries are dropped and
+    `uncovered` defaults to `[]`, so one bad upload cannot break a page.
+35. **`job failed`** (review #6): a run whose tests passed but whose job failed afterwards shows a warn-tone "job failed" chip
+    and ranks above passed. `inactive` runs are neutral and are left out of the "Not everything went well" banner.
+36. **Patch coverage is per flag** (review #7); flags are never added together.
+37. **Commit URLs need the full 40-character sha** (review #11); a shorter one is a 404 with a hint.
+38. **Test history** lists the runs from the newest to the oldest recorded failure and says "no failure reported" for the
+    others, because only failures are stored in D1; an absent or skipped test is not "passed".
+39. **Raw files** are streamed through gzip only when the stored object starts with the gzip magic bytes; otherwise 404.

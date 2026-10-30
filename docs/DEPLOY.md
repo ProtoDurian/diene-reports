@@ -48,6 +48,7 @@ wrangler r2 bucket lifecycle list diene-reports
 - Access app on `reports.atomi.cloud` for people (the viewer).
 - Bypass policy for `/api/v1/*` (GitHub OIDC is the auth there) and `/badge/*`.
 - Leave `/healthz` behind Access or add it to the bypass; it only returns `{"ok":true}`.
+- The Worker also checks the `Cf-Access-Jwt-Assertion` header itself on every other route (team `ACCESS_TEAM_DOMAIN`, audience `ACCESS_AUD`, both in `wrangler.jsonc`). A missing or invalid token gets 403, so a misconfigured Access app or an enabled `workers.dev` host cannot expose private source. The only exempt paths are `/healthz`, `/api/v1/*` and `/badge/<owner>/<repo>/<flag>`.
 
 ## 6. Check
 
@@ -58,7 +59,14 @@ curl -si https://reports.atomi.cloud/api/v1/runs/known-failing?flag=x   # 401 wi
 
 ## Local
 
+The viewer needs an Access token, so a small stand-in signs one for you.
+
 ```sh
-wrangler d1 migrations apply diene_reports --local
-wrangler dev
+bun run seed                 # fills local D1 + R2 with every outcome class (demo-app, PR #7, a private repo)
+wrangler dev --local --port 8799 --var ACCESS_TEAM_DOMAIN:http://localhost:8800 --var ACCESS_AUD:local-dev
+bun run dev:access           # second terminal: serves the JWKS and proxies to :8799 with a signed token
+# open http://localhost:8800/ProtoDurian/demo-app/commit/0000000000000000000000000000000000000003
 ```
+
+The seed runs the real API against in-memory shims and copies the result into the local wrangler state.
+Screenshots of the commit page: `docs/screenshots/`.

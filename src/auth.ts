@@ -113,18 +113,18 @@ export interface Identity {
   pr: number | null;
 }
 
-const b64u = (s: string): Uint8Array<ArrayBuffer> => {
+export const b64u = (s: string): Uint8Array<ArrayBuffer> => {
   const pad = s.length % 4 === 0 ? "" : "=".repeat(4 - (s.length % 4));
   const bin = atob(s.replace(/-/g, "+").replace(/_/g, "/") + pad);
   return Uint8Array.from(bin, (c) => c.charCodeAt(0));
 };
-const parseJsonPart = (s: string): Record<string, unknown> => {
+export const parseJsonPart = (s: string): Record<string, unknown> => {
   const v = JSON.parse(new TextDecoder().decode(b64u(s)));
   if (v === null || typeof v !== "object" || Array.isArray(v)) throw new Error("not an object");
   return v as Record<string, unknown>;
 };
 
-const SKEW_S = 60;
+export const SKEW_S = 60;
 
 export async function verifyToken(
   token: string,
