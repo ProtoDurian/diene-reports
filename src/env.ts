@@ -13,6 +13,8 @@ export interface Env {
   GITHUB_APP_ID: string;
   /** secret: base64 of the PEM private key GitHub lets you download for the App (PKCS#1 or PKCS#8) */
   GITHUB_APP_PRIVATE_KEY_B64: string;
+  /** var: comma list of owner/repo whose scheduled workflow on main may POST /api/v1/visibility (default ProtoDurian/diene-reports) */
+  VISIBILITY_REPORTERS?: string;
 }
 
 export const ISSUER = "https://token.actions.githubusercontent.com";
@@ -27,6 +29,8 @@ export const LIMITS = {
   sourceGzip: 2 * 1024 * 1024,
   sourceBytes: 1024 * 1024,
   sourceCheck: 20_000,
+  visibilityBody: 1024 * 1024,
+  visibilityRepos: 10_000,
   failures: 200,
   recovered: 5000,
   covFiles: 20_000,

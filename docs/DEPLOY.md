@@ -55,12 +55,12 @@ repos only to signed-in users that GitHub says can see the repo.
 - Request user authorization during installation, Webhook: **off**
 - Permissions: **Repository, Metadata: read-only** (this is all that is needed to ask "can this user see this repo").
   No account permissions.
-- Where it can be installed: any account. **Install the App on every org/repo whose private projects should be visible.**
-  A user only sees a private repo in the viewer when the App can see it **and** they can.
+- Where it can be installed: any account. The App is **only for sign-in** now: a user's own token decides whether they may see a private repo, so the App
+  does not have to be installed anywhere for that. (Install it on an owner only if you also want the optional installation-token fallback of step e.)
 - Generate a client secret.
 
 **b. The client id** is already set in `wrangler.jsonc` (`vars.GITHUB_CLIENT_ID = "Iv23liYO0YI12YeI2S5S"`). It is not secret. Login stays off
-(`/login` answers 503) while it is `TBD` or empty. The client id + secret are also used (HTTP Basic) to revoke tokens on sign-out. Visibility checks use the App installation instead (step e).
+(`/login` answers 503) while it is `TBD` or empty. The client id + secret are also used (HTTP Basic) to revoke tokens on sign-out. Public/private is decided by the visibility relay instead (step e).
 
 **c. Set the two secrets** (never commit them):
 
@@ -75,25 +75,26 @@ be decrypted, they are treated as signed out and cleaned up by the cron). Keep a
 **d. Apply migrations `0004_sessions.sql`, `0005_repo_visibility_checked.sql` and `0006_app_installations.sql`** (step 2, `--remote`) before deploying.
 Without `0005` the viewer cannot read `repos.vis_checked_at` and every viewer page errors; `0006` caches the installation id per owner.
 
-**e. Visibility checks as the App installation** (needs the App's private key). GitHub rejects the client id/secret on
-`GET /repositories/{id}` and rate-limits unauthenticated calls to 60/hour per shared Cloudflare IP, so the cron and the inline re-check
-authenticate as the App **installation**:
+**e. Repo visibility: the GitHub Actions relay** (main path, no key, no secret). Whether a repo is public decides who may view it, so the
+Worker has to know. GitHub rate-limits unauthenticated calls per shared Cloudflare IP (60/h; seen failing after 2), and the App is not
+installed, so the Worker does not ask GitHub itself. Instead `.github/workflows/visibility.yaml` in this repo runs every 30 min
+(and on `workflow_dispatch`), lists the org's public repos with its own `GITHUB_TOKEN` and posts them to `POST /api/v1/visibility`,
+authenticated with its OIDC token (audience `diene-reports`, same as uploads).
 
-1. On the App's settings page, **Generate a private key** (downloads a `.pem`, PKCS#1 `BEGIN RSA PRIVATE KEY`; PKCS#8 also works).
-2. Store it as a secret, base64 of the whole file (one line), never committed:
-
-   ```sh
-   base64 -w0 < your-app.private-key.pem | wrangler secret put GITHUB_APP_PRIVATE_KEY_B64
-   ```
-
-3. `vars.GITHUB_APP_ID = "5545592"` is already in `wrangler.jsonc` (the numeric **App ID**, not the client id).
-4. **Install the App on every owner (org or user) whose repos are uploaded**, with Repository permission **Metadata: read**.
-   The Worker finds the installation per owner (`GET /orgs/{owner}/installation`, then `/users/{owner}/installation`) and caches
-   the id in D1 (a "not installed" answer is retried after 1 h; install the App and it is picked up within the hour).
-
-Without the key or the app id, or for an owner without the installation, checks fall back to **unauthenticated**
-`GET /repositories/{id}`: public repos are confirmed, private ones answer 404 (so stay private), but the 60/hour/IP limit applies and
-rate-limited checks are skipped (the viewer shows "try again" for an unconfirmable public repo). Public repos are re-confirmed every 6 h.
+- `vars.VISIBILITY_REPORTERS` (in `wrangler.jsonc`): comma list of `owner/repo` allowed to post. Default `ProtoDurian/diene-reports`.
+  A post is accepted only from such a repository, on `refs/heads/main`, for `event_name` `schedule` or `workflow_dispatch`; else 403.
+  The body's `owner` must be the token's `repository_owner`.
+- Listed repos become `public` (and a renamed `full_name` is stored). With `complete: true` (every page of the listing read) every other repo of that
+  owner becomes `private`. A failed or partial listing never posts, and `complete: false` never makes anything private.
+- Nothing to install or store. Run it once after deploying: Actions, "Visibility relay", Run workflow (or `gh workflow run visibility.yaml`),
+  then check the log shows `HTTP 200` and the counts.
+- The Worker's own checks stay as a **fallback**: the 30-min cron and the inline re-check (public repos not confirmed for 6 h) still call
+  `GET /repositories/{id}`, as the App installation if `GITHUB_APP_PRIVATE_KEY_B64` is set and the App is installed on the owner, else unauthenticated
+  (60/h/IP; a rate-limited check is skipped and the viewer says "try again" for an unconfirmable public repo). Because the relay refreshes
+  `vis_checked_at` every 30 min, the inline re-check normally never fires. If the relay stops for more than 6 h, public repos go to "try again"
+  (fail closed) until it runs again.
+- Optional fallback key: generate a private key on the App's settings page and `base64 -w0 < key.pem | wrangler secret put GITHUB_APP_PRIVATE_KEY_B64`;
+  install the App with Repository permission Metadata: read on each owner. Not needed for the relay.
 
 **f. Remove the old Cloudflare Access apps** for `reports.atomi.cloud` (and their bypass policies), if any exist. The Worker ignores
 `Cf-Access-Jwt-Assertion` now, so leaving them in place only blocks people.

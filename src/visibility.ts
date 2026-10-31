@@ -1,4 +1,6 @@
-import { HOUR, type Env } from "./env";
+import { HttpError } from "./http";
+import { HOUR, LIMITS, type Env } from "./env";
+import type { Identity } from "./auth";
 import { dropToken, installationAuth } from "./githubapp";
 import type { AuthDeps } from "./session";
 
@@ -89,4 +91,76 @@ export async function sweepVisibility(env: Env, deps: AuthDeps): Promise<{ check
   };
   await Promise.all([worker(), worker(), worker(), worker()]);
   return { checked, changed, skipped };
+}
+
+export const VIS_REPORT_SCHEMA = "diene-visibility/v1";
+export const VIS_REPORTERS_DEFAULT = "ProtoDurian/diene-reports";
+export const VIS_REPORT_EVENTS = ["schedule", "workflow_dispatch"];
+
+export interface VisibilityReport {
+  owner: string;
+  complete: boolean;
+  /** [repo_id, name] */
+  pub: [number, string][];
+}
+
+/** The relay workflow lists the owner's public repos with its own GITHUB_TOKEN and posts them; no Worker-side GitHub call, no App key. */
+export function parseVisibilityReport(doc: unknown): VisibilityReport {
+  const bad = (m: string) => new HttpError(400, `invalid visibility report: ${m}`);
+  if (doc === null || typeof doc !== "object" || Array.isArray(doc)) throw bad("not an object");
+  const d = doc as Record<string, unknown>;
+  if (d.schema !== VIS_REPORT_SCHEMA) throw bad("schema");
+  if (typeof d.owner !== "string" || !/^[A-Za-z0-9][A-Za-z0-9-]{0,38}$/.test(d.owner)) throw bad("owner");
+  if (typeof d.complete !== "boolean") throw bad("complete");
+  if (!Array.isArray(d.public)) throw bad("public");
+  if (d.public.length > LIMITS.visibilityRepos) throw bad("too many entries");
+  const seen = new Set<number>();
+  const pub: [number, string][] = [];
+  for (const e of d.public) {
+    if (e === null || typeof e !== "object" || Array.isArray(e)) throw bad("entry");
+    const { id, full_name } = e as Record<string, unknown>;
+    if (typeof id !== "number" || !Number.isSafeInteger(id) || id <= 0) throw bad("entry id");
+    const m = typeof full_name === "string" ? /^([A-Za-z0-9][A-Za-z0-9-]{0,38})\/([A-Za-z0-9._-]{1,100})$/.exec(full_name) : null;
+    if (!m || m[1]!.toLowerCase() !== d.owner.toLowerCase()) throw bad("entry full_name");
+    if (seen.has(id)) continue;
+    seen.add(id);
+    pub.push([id, m[2]!]);
+  }
+  return { owner: d.owner, complete: d.complete, pub };
+}
+
+/** repository allowed to report: listed in VISIBILITY_REPORTERS (default VIS_REPORTERS_DEFAULT), on main, from a scheduled or manual run */
+export function mayReportVisibility(env: Pick<Env, "VISIBILITY_REPORTERS">, id: Identity): boolean {
+  const list = (env.VISIBILITY_REPORTERS?.trim() ? env.VISIBILITY_REPORTERS : VIS_REPORTERS_DEFAULT)
+    .split(",")
+    .map((s) => s.trim().toLowerCase())
+    .filter(Boolean);
+  return list.includes(id.repository.toLowerCase()) && id.ref === "refs/heads/main" && VIS_REPORT_EVENTS.includes(id.event);
+}
+
+/**
+ * Apply a relay report to every repo of `report.owner`: listed → public (+ the new name after a rename); not listed and complete → private.
+ * Rows only get vis_checked_at = now when the report decided them. One atomic D1 batch of four statements.
+ */
+export async function applyVisibilityReport(env: Env, report: VisibilityReport, now: number): Promise<{ updated: number; madePublic: number; madePrivate: number }> {
+  const list = JSON.stringify(report.pub);
+  const mine = `lower(owner) = lower(?1)`;
+  const listed = `repo_id IN (SELECT json_extract(value, '$[0]') FROM json_each(?2))`;
+  const db = env.DB;
+  const [pubCount, privCount, setPublic, setPrivate] = await db.batch([
+    db.prepare(`SELECT COUNT(*) AS n FROM repos WHERE ${mine} AND visibility != 'public' AND ${listed}`).bind(report.owner, list),
+    db.prepare(`SELECT COUNT(*) AS n FROM repos WHERE ${mine} AND visibility != 'private' AND NOT ${listed} AND ?3 = 1`).bind(report.owner, list, report.complete ? 1 : 0),
+    db
+      .prepare(
+        `UPDATE repos SET visibility = 'public', owner = ?1, name = j.name, vis_checked_at = ?3
+         FROM (SELECT json_extract(value, '$[0]') AS id, json_extract(value, '$[1]') AS name FROM json_each(?2)) AS j
+         WHERE repos.repo_id = j.id AND lower(repos.owner) = lower(?1)`,
+      )
+      .bind(report.owner, list, now),
+    db
+      .prepare(`UPDATE repos SET visibility = 'private', vis_checked_at = ?3 WHERE ${mine} AND NOT ${listed} AND ?4 = 1`)
+      .bind(report.owner, list, now, report.complete ? 1 : 0),
+  ]);
+  const n = (r: D1Result) => (r.results[0] as { n: number }).n;
+  return { updated: setPublic!.meta.changes + setPrivate!.meta.changes, madePublic: n(pubCount!), madePrivate: n(privCount!) };
 }
