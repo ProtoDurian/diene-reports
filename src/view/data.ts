@@ -118,12 +118,12 @@ export const headWithCoverage = (h: Head): RunRow =>
 export async function homeRows(env: Env) {
   const res = await env.DB
     .prepare(
-      `SELECT rp.owner, rp.name, rp.visibility, rp.vis_checked_at, p.branch, c.cov_lines AS c_lines, c.cov_lines_hit AS c_hit, c.cov_partial AS c_partial, r.* FROM branch_head h
+      `SELECT rp.owner, rp.name, rp.visibility, rp.vis_checked_at, rp.default_branch, p.branch, c.cov_lines AS c_lines, c.cov_lines_hit AS c_hit, c.cov_partial AS c_partial, r.* FROM branch_head h
        JOIN projects p ON p.project_id = h.project_id JOIN repos rp ON rp.repo_id = p.repo_id JOIN runs r ON r.id = h.run_id
        LEFT JOIN runs c ON c.id = h.cov_run_id
        ORDER BY rp.owner, rp.name, p.branch, r.flag`,
     )
-    .all<RunRow & { owner: string; name: string; visibility: string; vis_checked_at: number; c_lines: number | null; c_hit: number | null; c_partial: number | null }>();
+    .all<RunRow & { owner: string; name: string; visibility: string; vis_checked_at: number; default_branch: string | null; c_lines: number | null; c_hit: number | null; c_partial: number | null }>();
   return res.results.map(({ c_lines, c_hit, c_partial, ...r }) =>
     c_lines === null ? r : { ...r, cov_lines: c_lines, cov_lines_hit: c_hit, cov_partial: c_partial ?? 0 },
   );
@@ -173,11 +173,11 @@ export async function recentPrs(env: Env, pid: number, limit = 15) {
 export async function covTrend(env: Env, pid: number, flag: string, limit = 40) {
   const r = await env.DB
     .prepare(
-      `SELECT cov_lines, cov_lines_hit, sha FROM runs WHERE project_id = ?1 AND flag = ?2 AND lane = 'branch' AND cov_lines IS NOT NULL
+      `SELECT cov_lines, cov_lines_hit, sha, COALESCE(finished_at, created_at) AS at FROM runs WHERE project_id = ?1 AND flag = ?2 AND lane = 'branch' AND cov_lines IS NOT NULL
        ORDER BY gh_run_id DESC, gh_run_attempt DESC LIMIT ?3`,
     )
     .bind(pid, flag, limit)
-    .all<{ cov_lines: number; cov_lines_hit: number; sha: string }>();
+    .all<{ cov_lines: number; cov_lines_hit: number; sha: string; at: number }>();
   return r.results.reverse();
 }
 
@@ -240,4 +240,31 @@ export async function lastFailure(env: Env, pid: number, testId: string) {
     )
     .bind(pid, testId)
     .first<FailureRow & { sha: string; flag: string; finished_at: number | null }>();
+}
+
+/** Coverage % of the last `limit` branch runs per (project, flag), oldest first. One query for any number of projects. */
+export async function covSeries(env: Env, projectIds: number[], limit = 20): Promise<Map<string, number[]>> {
+  const out = new Map<string, number[]>();
+  if (!projectIds.length) return out;
+  const res = await env.DB
+    .prepare(
+      `SELECT project_id, flag, cov_lines, cov_lines_hit FROM (
+         SELECT project_id, flag, cov_lines, cov_lines_hit,
+                ROW_NUMBER() OVER (PARTITION BY project_id, flag ORDER BY gh_run_id DESC, gh_run_attempt DESC) AS rn
+         FROM runs WHERE lane = 'branch' AND cov_lines IS NOT NULL AND project_id IN (SELECT value FROM json_each(?1))
+       ) WHERE rn <= ?2 ORDER BY project_id, flag, rn DESC`,
+    )
+    .bind(JSON.stringify(projectIds), limit)
+    .all<{ project_id: number; flag: string; cov_lines: number; cov_lines_hit: number }>();
+  for (const r of res.results) {
+    const k = `${r.project_id}\0${r.flag}`;
+    (out.get(k) ?? out.set(k, []).get(k)!).push(r.cov_lines === 0 ? 100 : (r.cov_lines_hit / r.cov_lines) * 100);
+  }
+  return out;
+}
+
+/** repos the signed-in user was recently allowed to see (no GitHub call): used to fill the left nav */
+export async function allowedRepoIds(env: Env, userId: number, since: number): Promise<Set<number>> {
+  const res = await env.DB.prepare(`SELECT repo_id FROM repo_access WHERE user_id = ?1 AND allowed = 1 AND checked_at > ?2`).bind(userId, since).all<{ repo_id: number }>();
+  return new Set(res.results.map((r) => r.repo_id));
 }

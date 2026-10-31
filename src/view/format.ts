@@ -43,6 +43,8 @@ export type RunRow = {
   warnings: string | null;
   workflow: string | null;
   language: string | null;
+  actor: string | null;
+  event: string | null;
 };
 
 export interface StateInfo {
@@ -96,6 +98,20 @@ export function fmtTime(ms: number | null): string {
   if (ms === null) return "n/a";
   const d = new Date(ms);
   return `${d.toISOString().slice(0, 16).replace("T", " ")} UTC`;
+}
+
+/** "3 min ago" style; anything not in the past (clock skew) reads "just now" */
+export function fmtAgo(ms: number | null, now: number): string {
+  if (ms === null) return "n/a";
+  const s = Math.floor((now - ms) / 1000);
+  if (s < 45) return "just now";
+  const m = Math.round(s / 60);
+  if (m < 60) return `${m} min ago`;
+  const h = Math.round(m / 60);
+  if (h < 24) return `${h} h ago`;
+  const d = Math.round(h / 24);
+  if (d < 60) return `${d} day${d === 1 ? "" : "s"} ago`;
+  return `${Math.round(d / 30)} months ago`;
 }
 
 export const short = (sha: string) => sha.slice(0, 7);

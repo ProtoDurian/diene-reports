@@ -201,12 +201,12 @@ describe("nits", () => {
   test("inactive stays out of the red banner", async () => {
     await finishN(h, 1, { cls: "inactive", tests: null, coverage: null });
     const t = (await h.view(`${base}/commit/${sha(1)}`)).text;
-    expect(t).not.toContain("Not everything went well");
+    expect(t).not.toContain("Run problems");
     expect(t).not.toContain('class="banner');
     await finishN(h, 2, { cls: "inactive", tests: null, coverage: null, flag: "lint", job: "lint" });
     await finishN(h, 2, { cls: "cancelled", tests: null, coverage: null });
     const t2 = (await h.view(`${base}/commit/${sha(2)}`)).text;
-    expect(t2).toContain("Not everything went well");
+    expect(t2).toContain("Run problems");
     const banner = /<section class="banner[^]*?<\/section>/.exec(t2)![0];
     expect(banner).toContain("cancelled");
     expect(banner).not.toContain("inactive");
@@ -223,5 +223,27 @@ describe("nits", () => {
 
   test("the banner list keeps its bullets in line (block links)", async () => {
     expect((await h.view("/assets/app.css")).text).toContain(".banner li a{display:block");
+  });
+});
+
+describe("test list filters", () => {
+  test("?status= filters server-side, marks the active filter and offers a search box", async () => {
+    const report = { tests: { cases: [
+      { id: "a", suite: "s", name: "adds", status: "passed", durationMs: 3 },
+      { id: "b", suite: "s", name: "breaks <b>x</b>", status: "failed", durationMs: 4, message: "boom" },
+      { id: "c", suite: "s", name: "later", status: "skipped", durationMs: 0 },
+    ] } };
+    const id = await fullRun(1, { coverage: covOf(10, 9) }, report);
+    const all = await h.view(`${base}/run/${id}/tests`);
+    expect(all.status).toBe(200);
+    expect(all.text).toContain("data-search");
+    expect(all.text).toMatch(/href="[^"]*\?status=failed"/);
+    const failed = await h.view(`${base}/run/${id}/tests?status=failed`);
+    expect(failed.status).toBe(200);
+    expect(failed.text).toContain('aria-current="true"');
+    expect(failed.text).toContain("breaks &lt;b&gt;x&lt;/b&gt;");
+    expect(failed.text).not.toContain("<b>x</b>");
+    expect(failed.text).not.toContain("adds");
+    expect((await h.view(`${base}/run/${id}/tests?status=bogus`)).status).toBe(200);
   });
 });
