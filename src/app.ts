@@ -7,6 +7,7 @@ import { guard } from "./db";
 import type { Fetcher } from "./session";
 import { finishRun, knownFailing, ownedRun, startRun } from "./runs";
 import { attribution, checkSources, putSource } from "./sources";
+import { applyVisibilityReport, mayReportVisibility, parseVisibilityReport } from "./visibility";
 import { NotFound } from "./view/pages";
 import { mountViewer, viewerErrors } from "./view/routes";
 import { parseFlag, parseStart, parseSummary } from "./summary";
@@ -119,6 +120,14 @@ export function buildApp(overrides: Partial<Deps> = {}) {
   api.put("/sources/:blobSha", async (c) => {
     const stored = await putSource(c.env, c.get("id"), c.req.raw, c.req.param("blobSha"), attribution(c.req.query("flag"), c.req.query("job")), deps.now());
     return stored ? c.json({ ok: true }) : c.body(null, 204);
+  });
+
+  api.post("/visibility", async (c) => {
+    const id = c.get("id");
+    if (!mayReportVisibility(c.env, id)) throw new HttpError(403, "not a visibility reporter");
+    const report = parseVisibilityReport(await readJson(c.req.raw, LIMITS.visibilityBody));
+    if (report.owner !== id.owner) throw new HttpError(403, "owner does not match the token");
+    return c.json(await applyVisibilityReport(c.env, report, deps.now()));
   });
 
   app.route("/api/v1", api);

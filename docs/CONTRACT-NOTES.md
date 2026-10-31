@@ -147,3 +147,18 @@
     the installation, the same call is made **unauthenticated** (200 → visibility, 404 → private, 403/429 → unknown, 60/h per shared egress IP).
     A failed lookup, mint or key import (5xx, bad key, rejected JWT) is "unknown" (nothing stored) and does **not** fall back to unauthenticated
     calls. Basic auth is only left for `DELETE /applications/{client_id}/token` on sign-out. The App needs Repository permission Metadata: read.
+53. **Visibility relay (main source of truth)** (added 2026-10-31). The Worker cannot ask GitHub reliably (note 52 needs an App key that will not exist;
+    unauthenticated calls share Cloudflare's egress IP, 60/h). `.github/workflows/visibility.yaml` (cron `*/30 * * * *` + `workflow_dispatch`, only
+    `contents: read` + `id-token: write`, curl + jq, no third-party actions) pages `GET /orgs/ProtoDurian/repos?type=public&per_page=100` with its
+    `GITHUB_TOKEN` until an empty page. Any non-200 → exit 1 without posting; else `complete: true`. It posts
+    `{schema:"diene-visibility/v1", owner, complete, public:[{id, full_name}]}` (≤ 10 000 entries, 1 MiB) to `POST /api/v1/visibility` with its OIDC token.
+    The route sits behind the normal OIDC check (audience, owner allow-list: 401/403). Then it requires `repository` ∈ `VISIBILITY_REPORTERS` (var, comma
+    list, case-insensitive, empty → `ProtoDurian/diene-reports`), `ref == refs/heads/main`, `event_name` ∈ {schedule, workflow_dispatch}, and body
+    `owner` == token `repository_owner`; each failure is 403. Malformed body → 400 (every `full_name` must be `owner/name` of that owner).
+    Effect on the owner's repos rows (matched case-insensitively): listed → `public`, `name` from `full_name`, `vis_checked_at = now`; not listed and
+    `complete` → `private`, `vis_checked_at = now`; not listed and not complete → untouched (neither flipped nor marked checked). One D1 batch of
+    4 statements (2 counts, 2 updates over `json_each`), atomic. Answer `{updated, madePublic, madePrivate}` (`updated` = rows written; the two counts only
+    rows whose visibility actually changed). Repos of other owners are never touched. A repo created or flipped to public between two runs
+    is picked up within 30 min; a repo made private stays public in the viewer for at most that long (the workflow is the control, not a webhook).
+    Notes 47, 48 and 52 stay as the **fallback** (cron, inline re-check, installation/unauthenticated calls); the relay's `vis_checked_at` keeps them
+    from firing. The GitHub App is now only for sign-in (note 39); no App key is required.
