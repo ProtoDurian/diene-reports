@@ -127,4 +127,4 @@ wrangler dev --var GITHUB_CLIENT_ID:Iv1.yourid --var PUBLIC_BASE_URL:http://loca
 ```
 
 The seed runs the real API against in-memory shims and copies the result into the local wrangler state.
-Screenshots of the commit page: `docs/screenshots/`.
+Screenshots of every page, light and dark, 1280 px and 390 px: `docs/screenshots/`.

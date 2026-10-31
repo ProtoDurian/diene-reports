@@ -188,7 +188,7 @@ describe("raw files and assets", () => {
     expect(css.text).toContain("prefers-color-scheme:dark");
     expect(css.text).toContain("max-width:640px");
     expect(css.text).toContain("min-height:44px");
-    expect(css.text.length).toBeLessThan(16 * 1024);
+    expect(css.text.length).toBeLessThan(36 * 1024);
     const js = await get("/assets/line.js");
     expect(js.headers.get("content-type")).toContain("javascript");
     expect(js.text.length).toBeLessThan(4 * 1024);
@@ -199,5 +199,44 @@ describe("raw files and assets", () => {
     expect(a.headers.get("content-type")).toContain("application/json");
     expect((await get("/api/v1/unknown")).status).toBe(401);
     expect((await get("/healthz")).status).toBe(200);
+  });
+});
+
+describe("app shell, fonts and test-list filters", () => {
+  test("every page has the top bar, a nav toggle that works without JS, and the sidebar", async () => {
+    const t = (await get(`${base}/commit/${s.showcaseSha}`)).text;
+    expect(t).toContain("diene reports");
+    expect(t).toContain('id="navchk"');
+    expect(t).toContain('class="side"');
+    expect(t).not.toContain("<!--auth-->");
+    expect(t).not.toContain("<!--sidebar-->");
+    expect(t).toContain("Sign in with GitHub");
+  });
+
+  test("breadcrumb names the repo and sha, and the verdict pill is present", async () => {
+    const t = (await get(`${base}/commit/${s.showcaseSha}`)).text;
+    expect(t).toContain(`href="${base}"`);
+    expect(t).toMatch(/class="st big tone-bad"/);
+    expect(t).toContain("Run problems");
+  });
+
+  test("fonts are self-hosted, immutable and woff2", async () => {
+    const css = (await get("/assets/app.css")).text;
+    const urls = [...css.matchAll(/url\((\/assets\/[^)]+\.woff2)\)/g)].map((m) => m[1]!);
+    expect(urls.length).toBe(2);
+    for (const u of urls) {
+      const r = await h.view(u);
+      expect(r.status).toBe(200);
+      expect(r.headers.get("content-type")).toBe("font/woff2");
+      expect(r.headers.get("cache-control")).toContain("immutable");
+    }
+    expect(css).not.toMatch(/https?:\/\//);
+  });
+
+  test("ui.js is served as a small script", async () => {
+    const js = await get("/assets/ui.js");
+    expect(js.status).toBe(200);
+    expect(js.headers.get("content-type")).toContain("javascript");
+    expect(js.text.length).toBeLessThan(4 * 1024);
   });
 });

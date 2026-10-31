@@ -5,15 +5,22 @@ import {
   SESSION_COOKIE, SESSION_TTL_MS, STATE_COOKIE, authConfigured, createSession, deleteSession, exchangeCode, fetchGithubUser, makeState, revokeToken,
   readCookie, readState, safeNext, setCookie, timingEqual, type AuthDeps, type Session,
 } from "../session";
-import { enc, html, type Raw } from "./html";
+import { enc, html, icon, type Raw } from "./html";
+
+export interface NavRepo {
+  owner: string;
+  name: string;
+  tone: string;
+}
 
 export type V = { Bindings: Env; Variables: { viewer: Session | null } };
 
-/** "Sign in with GitHub", or the avatar, name and a sign-out button. `here` is the page to come back to. */
+/** "Sign in with GitHub", or the avatar and a small menu with the name and a sign-out button. `here` is the page to come back to. */
 export function authHtml(viewer: Session | null, here: string): Raw {
-  if (!viewer) return html`<span class="auth"><a class="btn signin" href="/login?next=${enc(here)}">Sign in with GitHub</a></span>`;
-  return html`<span class="auth">${viewer.avatarUrl ? html`<img class="avatar" src="${viewer.avatarUrl}" alt="" width="24" height="24">` : ""}<span class="who">${viewer.login}</span>
-<form method="post" action="/logout"><button class="linkbtn" type="submit">Sign out</button></form></span>`;
+  if (!viewer) return html`<span class="auth"><a class="btn signin" href="/login?next=${enc(here)}">${icon("github", 16)}Sign in with GitHub</a></span>`;
+  return html`<span class="auth"><details class="umenu"><summary>${viewer.avatarUrl ? html`<img class="avatar" src="${viewer.avatarUrl}" alt="" width="28" height="28">` : ""}<span class="who">${viewer.login}</span></summary>
+<div class="pop"><div class="hd">Signed in as <b>${viewer.login}</b></div>
+<form method="post" action="/logout"><button type="submit">Sign out</button></form></div></details></span>`;
 }
 
 const noStore = (c: Context) => c.header("Cache-Control", "no-store");
